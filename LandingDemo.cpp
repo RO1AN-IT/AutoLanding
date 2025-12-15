@@ -40,9 +40,16 @@ int main() {
     log << "Step\tPos(x,y,z, m)\tAltitude(z, m)\tVerticalVel(dz/dt, m/s)\tHorizontalVel(sqrt(vx^2+vy^2), m/s)\tDistToTarget(m)\tPitch(rad)\tRoll(rad)\n";
 
     ShipState state = controller.CurrentState();
+    // Горизонтальная скорость относительно земли (ground speed)
     auto horizontal_speed = [](const ShipState& s) {
         return std::sqrt(s.motion.velocity.x * s.motion.velocity.x +
                          s.motion.velocity.y * s.motion.velocity.y);
+    };
+    // Горизонтальная скорость относительно воздуха (air speed) - скорость, которая компенсирует ветер
+    auto horizontal_air_speed = [&params](const ShipState& s) {
+        double vx_air = s.motion.velocity.x - params.environment.wind_velocity.x;
+        double vy_air = s.motion.velocity.y - params.environment.wind_velocity.y;
+        return std::sqrt(vx_air * vx_air + vy_air * vy_air);
     };
     auto distance_to_target = [&controller](const ShipState& s) {
         LandingTarget target = controller.GetLandingTarget();
@@ -52,26 +59,33 @@ int main() {
         return std::sqrt(dx * dx + dy * dy + dz * dz);
     };
 
-    const auto log_state = [&log](const ShipState& s, double horiz_speed, double dist_to_target) {
+    const auto log_state = [&log, &controller, &params](const ShipState& s, double horiz_speed, double dist_to_target, double horiz_air_speed) {
+        auto gear_points = controller.GetGearPointsWorld(s);
         log << "step=" << s.step
             << " pos=(" << s.pose.position.x << "," << s.pose.position.y << "," << s.pose.position.z << ")"
             << " alt=" << s.pose.position.z << "m"
             << " v_vert=" << s.motion.velocity.z << "m/s"
-            << " v_h=" << horiz_speed << "m/s"
+            << " v_h_ground=" << horiz_speed << "m/s"
+            << " v_h_air=" << horiz_air_speed << "m/s"
             << " dist=" << dist_to_target << "m"
             << " pitch=" << s.pose.orientation.pitch
             << " roll=" << s.pose.orientation.roll
             << " yaw=" << s.pose.orientation.yaw
             << " omega=(" << s.motion.angular_velocity.x << "," << s.motion.angular_velocity.y << "," << s.motion.angular_velocity.z << ")"
+            << " gear=["
+            << "(" << gear_points[0].x << "," << gear_points[0].y << "," << gear_points[0].z << "),"
+            << "(" << gear_points[1].x << "," << gear_points[1].y << "," << gear_points[1].z << "),"
+            << "(" << gear_points[2].x << "," << gear_points[2].y << "," << gear_points[2].z << "),"
+            << "(" << gear_points[3].x << "," << gear_points[3].y << "," << gear_points[3].z << ")]"
             << '\n';
     };
 
-    log_state(state, horizontal_speed(state), distance_to_target(state));
+    log_state(state, horizontal_speed(state), distance_to_target(state), horizontal_air_speed(state));
 
     const size_t max_steps = 4000;
     for (size_t i = 0; i < max_steps; ++i) {
         state = controller.Step();
-        log_state(state, horizontal_speed(state), distance_to_target(state));
+        log_state(state, horizontal_speed(state), distance_to_target(state), horizontal_air_speed(state));
 
         LandingStatus status = controller.GetStatus();
 

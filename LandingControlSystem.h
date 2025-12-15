@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <deque>
 #include <functional>
@@ -77,6 +78,64 @@ struct ShipPose {
     Orientation orientation;
 };
 
+// Преобразования между корпусной (BODY) и мировой (WORLD) системами координат.
+// Используем порядок вращений yaw(Z) -> pitch(Y) -> roll(X).
+inline Vector3 BodyToWorld(const Vector3& v_body, const Orientation& ori) {
+    const double cy = std::cos(ori.yaw);
+    const double sy = std::sin(ori.yaw);
+    const double cp = std::cos(ori.pitch);
+    const double sp = std::sin(ori.pitch);
+    const double cr = std::cos(ori.roll);
+    const double sr = std::sin(ori.roll);
+
+    // Матрица R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    const double r00 = cy * cp;
+    const double r01 = cy * sp * sr - sy * cr;
+    const double r02 = cy * sp * cr + sy * sr;
+
+    const double r10 = sy * cp;
+    const double r11 = sy * sp * sr + cy * cr;
+    const double r12 = sy * sp * cr - cy * sr;
+
+    const double r20 = -sp;
+    const double r21 = cp * sr;
+    const double r22 = cp * cr;
+
+    return {
+        r00 * v_body.x + r01 * v_body.y + r02 * v_body.z,
+        r10 * v_body.x + r11 * v_body.y + r12 * v_body.z,
+        r20 * v_body.x + r21 * v_body.y + r22 * v_body.z
+    };
+}
+
+inline Vector3 WorldToBody(const Vector3& v_world, const Orientation& ori) {
+    const double cy = std::cos(ori.yaw);
+    const double sy = std::sin(ori.yaw);
+    const double cp = std::cos(ori.pitch);
+    const double sp = std::sin(ori.pitch);
+    const double cr = std::cos(ori.roll);
+    const double sr = std::sin(ori.roll);
+
+    // Матрица R как выше, но используем транспонированную R^T для обратного преобразования.
+    const double r00 = cy * cp;
+    const double r01 = cy * sp * sr - sy * cr;
+    const double r02 = cy * sp * cr + sy * sr;
+
+    const double r10 = sy * cp;
+    const double r11 = sy * sp * sr + cy * cr;
+    const double r12 = sy * sp * cr - cy * sr;
+
+    const double r20 = -sp;
+    const double r21 = cp * sr;
+    const double r22 = cp * cr;
+
+    return {
+        r00 * v_world.x + r10 * v_world.y + r20 * v_world.z,
+        r01 * v_world.x + r11 * v_world.y + r21 * v_world.z,
+        r02 * v_world.x + r12 * v_world.y + r22 * v_world.z
+    };
+}
+
 struct ShipKinematics {
     Vector3 velocity;
     Vector3 acceleration;
@@ -112,6 +171,12 @@ struct AttitudeThrustProfile {
     Vector3 negative{5000.0, 5000.0, 3000.0};
 };
 
+// Локальные координаты точек шасси в системе корабля (относительно центра масс).
+// Z, как правило, отрицательный (шасси ниже центра), X/Y задают вынос по корпусу.
+struct GearPoint {
+    Vector3 local_position;
+};
+
 struct ShipParameters {
     ThrustProfile thrust;
     AttitudeThrustProfile attitude_thrust;
@@ -120,6 +185,15 @@ struct ShipParameters {
     Environment environment;
     double mass{2000.0};
     double default_dt{0.02};
+
+    // Координаты четырёх опор шасси в корпусной системе координат.
+    // По умолчанию — квадрат вокруг центра, шасси ниже центра по Z.
+    GearPoint gear_points[4]{
+        {{ 2.0,  2.0, -2.0}},
+        {{-2.0,  2.0, -2.0}},
+        {{-2.0, -2.0, -2.0}},
+        {{ 2.0, -2.0, -2.0}},
+    };
 };
 
 struct LandingTarget {
@@ -257,18 +331,31 @@ inline ControlInput DefaultControlLaw(const ShipState& state,
     constexpr double k_pos_xy_base = 0.03;
     constexpr double k_vel_xy_base = 0.9;
 
+    // Усиление коэффициентов на малых расстояниях для точной остановки в цели.
+    // На расстоянии < 50 м коэффициенты увеличиваются в 3 раза.
+    constexpr double final_approach_dist = 50.0;
+    double dist_xy = std::sqrt(dx * dx + dy * dy);
+    double approach_factor = 1.0;
+    if (dist_xy < final_approach_dist) {
+        approach_factor = 1.0 + 2.0 * (1.0 - dist_xy / final_approach_dist); // от 1.0 до 3.0
+    }
+
     // Квадратичная зависимость усиления по X/Y от расстояния до цели.
     // При больших расстояниях позиционный и скоростной компоненты сильнее,
-    // при приближении к цели — ослабляются.
-    const double k_pos_xy = k_pos_xy_base * (1.0 + dist_weight);
-    const double k_vel_xy = k_vel_xy_base * (1.0 + dist_weight);
+    // при приближении к цели — ослабляются, но на финальном этапе усиливаются.
+    const double k_pos_xy = k_pos_xy_base * (1.0 + dist_weight) * approach_factor;
+    const double k_vel_xy = k_vel_xy_base * (1.0 + dist_weight) * approach_factor;
 
-    Vector3 desired_accel{};
-    desired_accel.x = pos_error.x * k_pos_xy + vel_error.x * k_vel_xy;
-    desired_accel.y = pos_error.y * k_pos_xy + vel_error.y * k_vel_xy;
-    desired_accel.z = pos_error.z * k_pos      + vel_error.z * k_vel_z;
-    desired_accel += target.motion.acceleration;
-    desired_accel -= params.environment.gravity;
+    Vector3 desired_accel_world{};
+    desired_accel_world.x = pos_error.x * k_pos_xy + vel_error.x * k_vel_xy;
+    desired_accel_world.y = pos_error.y * k_pos_xy + vel_error.y * k_vel_xy;
+    desired_accel_world.z = pos_error.z * k_pos      + vel_error.z * k_vel_z;
+    desired_accel_world += target.motion.acceleration;
+    desired_accel_world -= params.environment.gravity;
+
+    // КРИТИЧНО: поскольку thrust_ratio теперь интерпретируется в корпусной системе координат,
+    // нужно перевести желаемое ускорение из мировой системы в корпусную.
+    Vector3 desired_accel_body = WorldToBody(desired_accel_world, state.pose.orientation);
 
     const auto axis_ratio = [&](double desired, double pos_thr, double neg_thr) -> double {
         double limit_force = desired >= 0.0 ? pos_thr : neg_thr;
@@ -278,11 +365,12 @@ inline ControlInput DefaultControlLaw(const ShipState& state,
         return std::clamp(desired / achievable, -1.0, 1.0);
     };
 
-    // Области торможения по координатам.
+    // Области торможения по координатам (в корпусной системе).
     // Вне этих зон корабль разгоняется к цели с максимальной доступной тягой (bang-bang),
-    // внутри зон — используется более мягкий PD‑режим (desired_accel).
-    constexpr double brake_dist_x = 300.0;  // м по X
-    constexpr double brake_dist_y = 300.0;  // м по Y
+    // внутри зон — используется более мягкий PD‑режим (desired_accel_body).
+    // Уменьшены для более раннего начала торможения и предотвращения перелёта.
+    constexpr double brake_dist_x = 200.0;  // м по X (было 300.0)
+    constexpr double brake_dist_y = 200.0;  // м по Y (было 300.0)
     // Увеличенная область торможения по высоте: начинаем гасить скорость выше.
     constexpr double brake_dist_z = 800.0;  // м по Z
 
@@ -293,26 +381,93 @@ inline ControlInput DefaultControlLaw(const ShipState& state,
 
     ControlInput input{};
 
-    // X‑ось
-    if (std::abs(pos_error.x) > brake_dist_x) {
-        input.thrust_ratio.x = cruise_ratio_for_axis(pos_error.x);
-    } else {
-        input.thrust_ratio.x =
-            axis_ratio(desired_accel.x, params.thrust.positive.x, params.thrust.negative.x);
+    // X‑ось: режим «разгон – торможение» с прогнозом остановочного пути.
+    // Для определения направления используем мировые координаты, для тяги — корпусные.
+    {
+        double dx_world = pos_error.x;
+        double vx_world = vel_error.x;
+
+        // Направление к цели в корпусной системе (для вычисления тяги)
+        Vector3 dir_to_target_world{};
+        if (std::abs(dx_world) > 1e-6) {
+            dir_to_target_world.x = (dx_world > 0.0) ? 1.0 : -1.0;
+        }
+        Vector3 dir_to_target_body = WorldToBody(dir_to_target_world, state.pose.orientation);
+
+        double a_thrust_max_x = AxisAcceleration({1.0, 0.0, 0.0}, params).x;
+        double a_brake_x = std::max(1e-3, std::abs(a_thrust_max_x));
+
+        double v_abs = std::abs(vx_world);
+        double d_stop = (v_abs * v_abs) / (2.0 * a_brake_x);
+        constexpr double k_safety_xy = 1.3;
+
+        bool moving_toward = (dx_world * vx_world < 0.0); // скорость направлена к цели в мировой системе
+        bool need_brake = moving_toward && (std::abs(dx_world) <= d_stop * k_safety_xy);
+        
+        // На малых расстояниях (< 50 м) всегда используем PD для точной остановки
+        bool near_target = std::abs(dx_world) < 50.0;
+
+        if (!moving_toward || near_target) {
+            // Не движемся к цели, стоим или близко к цели — используем PD‑режим.
+            input.thrust_ratio.x =
+                axis_ratio(desired_accel_body.x, params.thrust.positive.x, params.thrust.negative.x);
+        } else if (!need_brake && std::abs(dx_world) > brake_dist_x) {
+            // Далеко от цели и ещё рано тормозить — летим в насыщении к цели.
+            input.thrust_ratio.x = (dir_to_target_body.x > 0.0) ? 1.0 : -1.0;
+        } else {
+            // Пора тормозить: используем PD для плавного торможения.
+            input.thrust_ratio.x =
+                axis_ratio(desired_accel_body.x, params.thrust.positive.x, params.thrust.negative.x);
+        }
     }
 
-    // Y‑ось
-    if (std::abs(pos_error.y) > brake_dist_y) {
-        input.thrust_ratio.y = cruise_ratio_for_axis(pos_error.y);
-    } else {
-        input.thrust_ratio.y =
-            axis_ratio(desired_accel.y, params.thrust.positive.y, params.thrust.negative.y);
+    // Y‑ось: аналогичная логика «разгон – торможение» с прогнозом.
+    {
+        double dy_world = pos_error.y;
+        double vy_world = vel_error.y;
+
+        // Направление к цели в корпусной системе (для вычисления тяги)
+        Vector3 dir_to_target_world{};
+        if (std::abs(dy_world) > 1e-6) {
+            dir_to_target_world.y = (dy_world > 0.0) ? 1.0 : -1.0;
+        }
+        Vector3 dir_to_target_body = WorldToBody(dir_to_target_world, state.pose.orientation);
+
+        double a_thrust_max_y = AxisAcceleration({0.0, 1.0, 0.0}, params).y;
+        double a_brake_y = std::max(1e-3, std::abs(a_thrust_max_y));
+
+        double v_abs = std::abs(vy_world);
+        double d_stop = (v_abs * v_abs) / (2.0 * a_brake_y);
+        constexpr double k_safety_xy = 1.3;
+
+        bool moving_toward = (dy_world * vy_world < 0.0);
+        bool need_brake = moving_toward && (std::abs(dy_world) <= d_stop * k_safety_xy);
+        
+        // На малых расстояниях (< 50 м) всегда используем PD для точной остановки
+        bool near_target = std::abs(dy_world) < 50.0;
+
+        if (!moving_toward || near_target) {
+            input.thrust_ratio.y =
+                axis_ratio(desired_accel_body.y, params.thrust.positive.y, params.thrust.negative.y);
+        } else if (!need_brake && std::abs(dy_world) > brake_dist_y) {
+            input.thrust_ratio.y = (dir_to_target_body.y > 0.0) ? 1.0 : -1.0;
+        } else {
+            input.thrust_ratio.y =
+                axis_ratio(desired_accel_body.y, params.thrust.positive.y, params.thrust.negative.y);
+        }
     }
 
     // Z‑ось: режим «разгон – торможение» с прогнозом остановочного пути.
     {
-        double dz = state.pose.position.z - target.pose.position.z; // >0 выше цели
-        double vz = state.motion.velocity.z - target.motion.velocity.z; // <0 при падении вниз
+        double dz_world = pos_error.z; // >0 выше цели
+        double vz_world = vel_error.z; // <0 при падении вниз
+
+        // Направление к цели в корпусной системе (для вычисления тяги)
+        Vector3 dir_to_target_world{};
+        if (std::abs(dz_world) > 1e-6) {
+            dir_to_target_world.z = (dz_world > 0.0) ? -1.0 : 1.0; // вниз если выше цели
+        }
+        Vector3 dir_to_target_body = WorldToBody(dir_to_target_world, state.pose.orientation);
 
         // Максимальное доступное ускорение вверх (при thrust_ratio.z = 1).
         double a_thrust_max_z = AxisAcceleration({0.0, 0.0, 1.0}, params).z;
@@ -320,39 +475,85 @@ inline ControlInput DefaultControlLaw(const ShipState& state,
         double a_brake = a_thrust_max_z + params.environment.gravity.z;
         a_brake = std::max(1e-3, a_brake); // защитимся от деления на ноль
 
-        double v_abs = std::abs(vz);
+        double v_abs = std::abs(vz_world);
         double d_stop = (v_abs * v_abs) / (2.0 * a_brake); // v^2 / (2a)
         constexpr double k_safety = 1.3; // запас по расстоянию
 
-        bool descending = (dz > 0.0 && vz < 0.0); // выше цели и падаем вниз
-        bool need_brake = descending && (dz <= d_stop * k_safety);
+        bool descending = (dz_world > 0.0 && vz_world < 0.0); // выше цели и падаем вниз
+        bool need_brake = descending && (dz_world <= d_stop * k_safety);
 
         if (!descending) {
             // Не в режиме нормального снижения — используем мягкий PD‑режим.
             input.thrust_ratio.z =
-                axis_ratio(desired_accel.z, params.thrust.positive.z, params.thrust.negative.z);
-        } else if (!need_brake && std::abs(dz) > brake_dist_z) {
+                axis_ratio(desired_accel_body.z, params.thrust.positive.z, params.thrust.negative.z);
+        } else if (!need_brake && std::abs(dz_world) > brake_dist_z) {
             // Далеко от цели и ещё рано тормозить — летим в насыщении к цели (вниз).
-            input.thrust_ratio.z = cruise_ratio_for_axis(pos_error.z); // pos_error.z < 0 -> вниз
+            input.thrust_ratio.z = (dir_to_target_body.z > 0.0) ? 1.0 : -1.0;
         } else {
-            // Пора тормозить: тянем вверх почти с максимальной тягой.
-            // Если уже сильно замедлились, даём PD для более мягкой подводки.
-            if (v_abs > 5.0) {
-                input.thrust_ratio.z = 1.0; // сильное торможение вверх
-            } else {
-                input.thrust_ratio.z =
-                    axis_ratio(desired_accel.z, params.thrust.positive.z, params.thrust.negative.z);
-            }
+            // Пора тормозить: используем PD для плавного торможения.
+            input.thrust_ratio.z =
+                axis_ratio(desired_accel_body.z, params.thrust.positive.z, params.thrust.negative.z);
         }
     }
 
     Orientation target_orientation = target.pose.orientation;
     Orientation current = state.pose.orientation;
 
+    // Хотим, чтобы корабль "смотрел" в сторону цели (по горизонтали).
+    // Желаемый курс определяем по вектору от корабля к цели в плоскости XY.
+    Vector3 to_target{
+        target.pose.position.x - state.pose.position.x,
+        target.pose.position.y - state.pose.position.y,
+        0.0
+    };
+    double desired_yaw = std::atan2(to_target.y, to_target.x);
+    double yaw_error = desired_yaw - current.yaw;
+    // Нормализуем yaw_error в диапазон [-pi, pi] для корректного поворота
+    while (yaw_error > M_PI)  yaw_error -= 2.0 * M_PI;
+    while (yaw_error < -M_PI) yaw_error += 2.0 * M_PI;
+
+    // Желаемый pitch зависит от ускорения вперед-назад (в корпусной системе).
+    // Если корабль разгоняется вперед (a_x > 0), то он "клюет носом" (pitch < 0).
+    // Если тормозит (a_x < 0), то поднимает нос (pitch > 0).
+    // Диапазон изменения: от -15 до +15 градусов.
+    
+    // Используем желаемое ускорение от регулятора в корпусной системе.
+    // Это ускорение, которое регулятор хочет создать для движения вперед-назад.
+    // Если желаемое ускорение мало, используем скорость вперед-назад в корпусной системе
+    // как индикатор направления движения.
+    Vector3 vel_body = WorldToBody(state.motion.velocity, state.pose.orientation);
+    double v_x_body = vel_body.x; // скорость вперед-назад в корпусной системе
+    
+    // Используем комбинацию желаемого ускорения и скорости для более стабильного поведения
+    double a_x_body = desired_accel_body.x; // ускорение вперед-назад в корпусной системе
+    
+    // Нормируем скорость по характерной скорости (например, 50 м/с)
+    constexpr double v_char = 50.0; // характерная скорость для нормирования
+    double v_norm = std::clamp(v_x_body / v_char, -1.0, 1.0);
+    
+    // Максимальное ускорение по оси X (вперед или назад)
+    double a_max_x_forward = params.thrust.positive.x / params.mass;
+    double a_max_x_backward = params.thrust.negative.x / params.mass;
+    double a_max_x = std::max(a_max_x_forward, a_max_x_backward);
+    if (a_max_x < 1e-6) a_max_x = 1e-6; // защита от деления на ноль
+    
+    // Комбинируем ускорение и скорость (ускорение имеет больший вес)
+    double combined = 0.7 * (a_x_body / a_max_x) + 0.3 * v_norm;
+    double a_norm = std::clamp(combined, -1.0, 1.0);
+    
+    // Умножаем на 15 градусов (в радианах: 15 * π/180 ≈ 0.262)
+    constexpr double max_pitch_deg = 15.0;
+    constexpr double max_pitch_rad = max_pitch_deg * M_PI / 180.0;
+    // Минус: при разгоне вперед (a_norm > 0) pitch должен быть отрицательным (нос вниз)
+    double desired_pitch = -a_norm * max_pitch_rad;
+    
+    // Если ускорение очень мало (близко к нулю), pitch будет близок к нулю.
+    // Это нормально, если регулятор не создает большого ускорения по оси X.
+
     Vector3 angle_error{
-        -state.pose.orientation.pitch,  // target pitch = 0
+        desired_pitch - state.pose.orientation.pitch,  // target pitch зависит от ускорения
         -state.pose.orientation.roll,   // target roll = 0
-        0.0                             // yaw orientation not enforced
+        yaw_error                       // yaw навёлся на цель
     };
     Vector3 rate_error{
         -state.motion.angular_velocity.x,
@@ -426,6 +627,19 @@ public:
         return target_;
     }
 
+    // Получить мировые координаты точек шасси для текущего состояния.
+    std::array<Vector3, 4> GetGearPointsWorld(const ShipState& state) const {
+        std::array<Vector3, 4> gear_world;
+        for (size_t i = 0; i < 4; ++i) {
+            // Переводим локальные координаты шасси из корпусной системы в мировую
+            Vector3 gear_body = params_.gear_points[i].local_position;
+            Vector3 gear_world_pos = BodyToWorld(gear_body, state.pose.orientation);
+            // Добавляем позицию центра масс корабля
+            gear_world[i] = state.pose.position + gear_world_pos;
+        }
+        return gear_world;
+    }
+
     // Интерфейс для получения статуса посадки по текущему состоянию корабля.
     // Не влияет на управление и не изменяет внутреннее состояние системы.
     LandingStatus GetStatus() const {
@@ -478,13 +692,17 @@ private:
     ShipState Integrate(const ShipState& current, const ControlInput& input) const {
         double dt = current.dt > 0.0 ? current.dt : params_.default_dt;
 
-        Vector3 clamped_ratio = ClampVector(input.thrust_ratio, -1.0, 1.0);
-        Vector3 thrust_accel = AxisAcceleration(clamped_ratio, params_);
-        Vector3 total_accel = thrust_accel + params_.environment.gravity;
+        // Тяга задаётся в корпусной системе координат (BODY), затем поворачивается в мировую (WORLD).
+        Vector3 clamped_ratio_body = ClampVector(input.thrust_ratio, -1.0, 1.0);
+        Vector3 thrust_accel_body = AxisAcceleration(clamped_ratio_body, params_);
+        Vector3 thrust_accel_world = BodyToWorld(thrust_accel_body, current.pose.orientation);
+        Vector3 total_accel = thrust_accel_world + params_.environment.gravity;
 
         Vector3 next_velocity = current.motion.velocity + total_accel * dt;
-        Vector3 wind_displacement = params_.environment.wind_velocity * dt;
-        Vector3 next_position = current.pose.position + next_velocity * dt + wind_displacement;
+        // Позиция меняется только через скорость относительно земли.
+        // Ветер уже учтен в скорости через регулятор (корабль компенсирует ветер,
+        // двигаясь со скоростью -wind_velocity относительно воздуха).
+        Vector3 next_position = current.pose.position + next_velocity * dt;
 
         Vector3 clamped_angular_ratio = ClampVector(input.angular_thrust_ratio, -1.0, 1.0);
         Vector3 angular_accel = AxisAngularAcceleration(clamped_angular_ratio, params_);
