@@ -203,7 +203,7 @@ struct LandingTarget {
 
 inline LandingTarget DefaultLandingTarget() {
     LandingTarget target{};
-    target.pose.position = {-1000.0, 2000.0, 100.0};
+    target.pose.position = {35000.0, -25600.0, 4000.0};
     target.pose.orientation = {0.0, 0.0, 0.0};
     target.motion.velocity = {0.0, 0.0, 0.0};
     target.motion.acceleration = {0.0, 0.0, 0.0};
@@ -331,18 +331,21 @@ inline ControlInput DefaultControlLaw(const ShipState& state,
     constexpr double k_pos_xy_base = 0.03;
     constexpr double k_vel_xy_base = 0.9;
 
-    // Усиление коэффициентов на малых расстояниях для точной остановки в цели.
-    // На расстоянии < 50 м коэффициенты увеличиваются в 3 раза.
-    constexpr double final_approach_dist = 50.0;
+    // Горизонтальное расстояние до цели для усиления коэффициентов на финальном этапе
     double dist_xy = std::sqrt(dx * dx + dy * dy);
+    constexpr double final_approach_dist = 300.0; // расстояние, на котором начинаем усиливать коэффициенты
+    
+    // Коэффициенты усиления на финальном этапе (обратная зависимость от расстояния)
     double approach_factor = 1.0;
     if (dist_xy < final_approach_dist) {
-        approach_factor = 1.0 + 2.0 * (1.0 - dist_xy / final_approach_dist); // от 1.0 до 3.0
+        // На расстоянии < 300 м коэффициенты увеличиваются до 5x при приближении к цели
+        // Это обеспечивает более агрессивное торможение и предотвращает перелет
+        approach_factor = 1.0 + 4.0 * (1.0 - dist_xy / final_approach_dist); // от 1.0 до 5.0
     }
 
     // Квадратичная зависимость усиления по X/Y от расстояния до цели.
     // При больших расстояниях позиционный и скоростной компоненты сильнее,
-    // при приближении к цели — ослабляются, но на финальном этапе усиливаются.
+    // при приближении к цели — ослабляются, но на финальном этапе (< 300 м) сильно усиливаются.
     const double k_pos_xy = k_pos_xy_base * (1.0 + dist_weight) * approach_factor;
     const double k_vel_xy = k_vel_xy_base * (1.0 + dist_weight) * approach_factor;
 
@@ -369,8 +372,8 @@ inline ControlInput DefaultControlLaw(const ShipState& state,
     // Вне этих зон корабль разгоняется к цели с максимальной доступной тягой (bang-bang),
     // внутри зон — используется более мягкий PD‑режим (desired_accel_body).
     // Уменьшены для более раннего начала торможения и предотвращения перелёта.
-    constexpr double brake_dist_x = 200.0;  // м по X (было 300.0)
-    constexpr double brake_dist_y = 200.0;  // м по Y (было 300.0)
+    constexpr double brake_dist_x = 200.0;  // м по X (уменьшено с 300.0)
+    constexpr double brake_dist_y = 200.0;  // м по Y (уменьшено с 300.0)
     // Увеличенная область торможения по высоте: начинаем гасить скорость выше.
     constexpr double brake_dist_z = 800.0;  // м по Z
 
@@ -382,37 +385,49 @@ inline ControlInput DefaultControlLaw(const ShipState& state,
     ControlInput input{};
 
     // X‑ось: режим «разгон – торможение» с прогнозом остановочного пути.
-    // Для определения направления используем мировые координаты, для тяги — корпусные.
+    // Используем ТОЧНО ту же логику, что и для Z-оси: проверяем конкретное состояние движения к цели.
     {
-        double dx_world = pos_error.x;
-        double vx_world = vel_error.x;
-
+        double dx_world = pos_error.x; // pos_error = target - state, поэтому dx > 0 означает цель справа
+        double vx_error = vel_error.x; // ошибка скорости (желаемая - фактическая), учитывает ветер
+        
         // Направление к цели в корпусной системе (для вычисления тяги)
         Vector3 dir_to_target_world{};
         if (std::abs(dx_world) > 1e-6) {
-            dir_to_target_world.x = (dx_world > 0.0) ? 1.0 : -1.0;
+            dir_to_target_world.x = (dx_world > 0.0) ? 1.0 : -1.0; // если цель справа (dx > 0), направление вправо (+1)
         }
         Vector3 dir_to_target_body = WorldToBody(dir_to_target_world, state.pose.orientation);
 
         double a_thrust_max_x = AxisAcceleration({1.0, 0.0, 0.0}, params).x;
         double a_brake_x = std::max(1e-3, std::abs(a_thrust_max_x));
 
-        double v_abs = std::abs(vx_world);
+        // КРИТИЧНО: используем vel_error для расчета остановочного пути, как для Z-оси
+        // Для Z: используется vel_error.z, а не фактическая скорость
+        double v_abs = std::abs(vx_error);
+        // Улучшенная формула остановочного пути: учитываем необходимость остановиться именно в цели
+        // Используем формулу: s = v*t + a*t^2/2, где t = v/a, получаем s = v^2/(2*a)
         double d_stop = (v_abs * v_abs) / (2.0 * a_brake_x);
-        constexpr double k_safety_xy = 1.3;
-
-        bool moving_toward = (dx_world * vx_world < 0.0); // скорость направлена к цели в мировой системе
+        constexpr double k_safety_xy = 1.3; // как для Z-оси
+        
+        // КРИТИЧНО: используем ТОЧНО ту же логику, что и для Z-оси
+        // Для Z: descending = (dz > 0 && vz_error < 0) - выше цели и падаем быстрее желаемого
+        // Для X: движение к цели = цель справа (dx > 0) И ошибка скорости положительная (vx_error > 0, нужно ускориться вправо)
+        //        ИЛИ цель слева (dx < 0) И ошибка скорости отрицательная (vx_error < 0, нужно ускориться влево)
+        // Это аналогично логике Z: если цель справа и нужно ускориться вправо (vx_error > 0), то движемся к цели
+        bool moving_toward = (dx_world > 0.0 && vx_error > 0.0) || (dx_world < 0.0 && vx_error < 0.0);
         bool need_brake = moving_toward && (std::abs(dx_world) <= d_stop * k_safety_xy);
         
-        // На малых расстояниях (< 50 м) всегда используем PD для точной остановки
-        bool near_target = std::abs(dx_world) < 50.0;
+        // На малых расстояниях (< 300 м) всегда используем PD для точной остановки и предотвращения перелета
+        bool near_target = std::abs(dx_world) < 300.0;
 
+        // КРИТИЧНО: если НЕ движемся к цели, ВСЕГДА используем PD-режим (как для Z-оси: if (!descending))
+        // Это предотвращает применение максимальной тяги когда корабль уже перелетел цель
         if (!moving_toward || near_target) {
-            // Не движемся к цели, стоим или близко к цели — используем PD‑режим.
+            // Не движемся к цели или близко к цели — используем PD‑режим.
             input.thrust_ratio.x =
                 axis_ratio(desired_accel_body.x, params.thrust.positive.x, params.thrust.negative.x);
         } else if (!need_brake && std::abs(dx_world) > brake_dist_x) {
             // Далеко от цели и ещё рано тормозить — летим в насыщении к цели.
+            // ТОЛЬКО если движемся К цели (moving_toward == true)
             input.thrust_ratio.x = (dir_to_target_body.x > 0.0) ? 1.0 : -1.0;
         } else {
             // Пора тормозить: используем PD для плавного торможения.
@@ -422,34 +437,48 @@ inline ControlInput DefaultControlLaw(const ShipState& state,
     }
 
     // Y‑ось: аналогичная логика «разгон – торможение» с прогнозом.
+    // Используем ТОЧНО ту же логику, что и для Z-оси: проверяем конкретное состояние движения к цели.
     {
-        double dy_world = pos_error.y;
-        double vy_world = vel_error.y;
+        double dy_world = pos_error.y; // pos_error = target - state, поэтому dy > 0 означает цель впереди
+        double vy_error = vel_error.y; // ошибка скорости (желаемая - фактическая), учитывает ветер
 
         // Направление к цели в корпусной системе (для вычисления тяги)
         Vector3 dir_to_target_world{};
         if (std::abs(dy_world) > 1e-6) {
-            dir_to_target_world.y = (dy_world > 0.0) ? 1.0 : -1.0;
+            dir_to_target_world.y = (dy_world > 0.0) ? 1.0 : -1.0; // если цель впереди (dy > 0), направление вперед (+1)
         }
         Vector3 dir_to_target_body = WorldToBody(dir_to_target_world, state.pose.orientation);
 
         double a_thrust_max_y = AxisAcceleration({0.0, 1.0, 0.0}, params).y;
         double a_brake_y = std::max(1e-3, std::abs(a_thrust_max_y));
 
-        double v_abs = std::abs(vy_world);
+        // КРИТИЧНО: используем vel_error для расчета остановочного пути, как для Z-оси
+        // Для Z: используется vel_error.z, а не фактическая скорость
+        double v_abs = std::abs(vy_error);
+        // Улучшенная формула остановочного пути: учитываем необходимость остановиться именно в цели
         double d_stop = (v_abs * v_abs) / (2.0 * a_brake_y);
-        constexpr double k_safety_xy = 1.3;
-
-        bool moving_toward = (dy_world * vy_world < 0.0);
+        constexpr double k_safety_xy = 1.3; // как для Z-оси
+        
+        // КРИТИЧНО: используем ТОЧНО ту же логику, что и для Z-оси
+        // Для Z: descending = (dz > 0 && vz_error < 0) - выше цели и падаем быстрее желаемого
+        // Для Y: движение к цели = цель впереди (dy > 0) И ошибка скорости положительная (vy_error > 0, нужно ускориться вперед)
+        //        ИЛИ цель сзади (dy < 0) И ошибка скорости отрицательная (vy_error < 0, нужно ускориться назад)
+        // Это аналогично логике Z: если цель впереди и нужно ускориться вперед (vy_error > 0), то движемся к цели
+        bool moving_toward = (dy_world > 0.0 && vy_error > 0.0) || (dy_world < 0.0 && vy_error < 0.0);
         bool need_brake = moving_toward && (std::abs(dy_world) <= d_stop * k_safety_xy);
         
-        // На малых расстояниях (< 50 м) всегда используем PD для точной остановки
-        bool near_target = std::abs(dy_world) < 50.0;
+        // На малых расстояниях (< 300 м) всегда используем PD для точной остановки и предотвращения перелета
+        bool near_target = std::abs(dy_world) < 300.0;
 
+        // КРИТИЧНО: если НЕ движемся к цели, ВСЕГДА используем PD-режим (как для Z-оси: if (!descending))
+        // Это предотвращает применение максимальной тяги когда корабль уже перелетел цель
         if (!moving_toward || near_target) {
+            // Не движемся к цели или близко к цели — используем PD‑режим.
             input.thrust_ratio.y =
                 axis_ratio(desired_accel_body.y, params.thrust.positive.y, params.thrust.negative.y);
         } else if (!need_brake && std::abs(dy_world) > brake_dist_y) {
+            // Далеко от цели и ещё рано тормозить — летим в насыщении к цели.
+            // ТОЛЬКО если движемся К цели (moving_toward == true)
             input.thrust_ratio.y = (dir_to_target_body.y > 0.0) ? 1.0 : -1.0;
         } else {
             input.thrust_ratio.y =

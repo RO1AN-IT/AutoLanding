@@ -22,7 +22,7 @@ int main() {
     params.angular_rate_limit = {0.05, 0.05, 0.08};
 
     ShipState initial{};
-    initial.pose.position = {0.0, 0.0, 6000.0};
+    initial.pose.position = {0.0, 0.0, 10000.0};
     initial.motion.velocity = {1.8, 50, -60.0};
     initial.motion.acceleration = {0.3, 6, -10};
     initial.motion.angular_velocity = {0.02, -0.03, 0.01};
