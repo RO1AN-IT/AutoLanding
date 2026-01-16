@@ -1,699 +1,1134 @@
 using System;
-using System.Runtime.InteropServices;
+using System.Collections.Generic;
 using UnityEngine;
+using AL = AutoLanding;
 
-namespace AutoLanding
+[System.Serializable]
+public class ThrustProfileData
 {
-    // Вспомогательные структуры и классы для работы с C++ DLL
-    // Структуры для передачи данных между C# и C++
-    [StructLayout(LayoutKind.Sequential)]
-    public struct Vector3D
-    {
-    public double x;
-    public double y;
-    public double z;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct OrientationD
-    {
-    public double pitch;
-    public double roll;
-    public double yaw;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct ShipStateD
-    {
-    public Vector3D position;
-    public OrientationD orientation;
-    public Vector3D velocity;
-    public Vector3D acceleration;
-    public Vector3D angular_velocity;
-    public Vector3D angular_acceleration;
-    public double dt;
-    public UIntPtr step;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct ShipParametersD
-    {
-    public Vector3D thrust_positive;
-    public Vector3D thrust_negative;
-    public Vector3D attitude_thrust_positive;
-    public Vector3D attitude_thrust_negative;
-    public Vector3D angular_rate_limit;
-    public double max_pitch;
-    public double max_roll;
-    public double max_yaw;
-    public Vector3D gravity;
-    public Vector3D wind_velocity;
-    public double mass;
-    public double default_dt;
-    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4)]
-    public Vector3D[] gear_points;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct LandingTargetD
-    {
-    public Vector3D position;
-    public OrientationD orientation;
-    public Vector3D velocity;
-    public Vector3D acceleration;
-    public Vector3D angular_velocity;
-    public Vector3D angular_acceleration;
-    }
-
-    public enum LandingStatusD
-    {
-    InFlight = 0,
-    Landed = 1,
-    Crashed = 2
-    }
-
-    // P/Invoke объявления для вызова C++ DLL
-    public static class LandingControlSystemNative
-    {
-#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
-    private const string DLL_NAME = "LandingControlSystemWrapper";
-#elif UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
-    private const string DLL_NAME = "libLandingControlSystemWrapper";
-#elif UNITY_STANDALONE_LINUX
-    private const string DLL_NAME = "libLandingControlSystemWrapper";
-#else
-    private const string DLL_NAME = "LandingControlSystemWrapper";
-#endif
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern IntPtr CreateLandingSystem(
-        ref ShipParametersD params_,
-        ref ShipStateD initial_state,
-        ref LandingTargetD target);
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void DestroyLandingSystem(IntPtr handle);
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void GetCurrentState(IntPtr handle, out ShipStateD state);
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void Step(IntPtr handle, out ShipStateD state);
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern LandingStatusD GetStatus(IntPtr handle);
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void GetGearPointsWorld(IntPtr handle, [Out] Vector3D[] gear_points);
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void SetLandingTarget(IntPtr handle, ref LandingTargetD target);
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void SetParameters(IntPtr handle, ref ShipParametersD params_);
-
-    [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-    public static extern void Reset(IntPtr handle);
-    }
-
+    public Vector3 positive = new Vector3(20000f, 20000f, 50000f);
+    public Vector3 negative = new Vector3(15000f, 15000f, 0f);
 }
 
-// Unity MonoBehaviour скрипт для управления посадкой
-// Класс вынесен из namespace для правильной работы с Unity Inspector
+[System.Serializable]
+public class EnvironmentData
+{
+    public Vector3 gravity = new Vector3(0f, -9.81f, 0f);
+    public Vector3 windVelocity = new Vector3(5f, 0f, 0f);
+    [Header("Сопротивление воздуха")]
+    [Tooltip("Плотность воздуха (кг/м³). Стандартное значение на уровне моря: 1.225")]
+    public double airDensity = 1.225;
+    [Tooltip("Коэффициент сопротивления. Типичные значения: 0.3-0.5 для обтекаемых форм, 0.8-1.2 для плоских поверхностей")]
+    public double dragCoefficient = 0.5;
+    [Tooltip("Площадь поперечного сечения корабля (м²)")]
+    public double crossSectionalArea = 10.0;
+}
+
+[System.Serializable]
+public class ShipParametersData
+{
+    [Header("Основные параметры")]
+    public double mass = 2200.0;
+    
+    [Header("Тяга")]
+    public ThrustProfileData thrust = new ThrustProfileData();
+    public ThrustProfileData attitudeThrust = new ThrustProfileData();
+    
+    [Header("Окружающая среда")]
+    public EnvironmentData environment = new EnvironmentData();
+    
+    [Header("Ограничения")]
+    public Vector3 orientationLimits = new Vector3(0.5f, 0.5f, 3.14159f);
+    public Vector3 angularRateLimit = new Vector3(1f, 1f, 1f);
+    
+    [Header("Топливо")]
+    public double fuelConsumptionRate = 0.5;
+    
+    [Header("Точки крепления шасси (локальные координаты)")]
+    public List<Vector3> gearPointsBody = new List<Vector3>
+    {
+        new Vector3(2f, 1.5f, -1f),
+        new Vector3(2f, -1.5f, -1f),
+        new Vector3(-2f, 1.5f, -1f),
+        new Vector3(-2f, -1.5f, -1f)
+    };
+}
+
 public class AutoLandingController : MonoBehaviour
 {
-    [Header("Ship Configuration")]
-    [Tooltip("Объект корабля (основной объект)")]
-    public Transform shipTransform;
-
-    [Tooltip("Массив из 4 точек шасси (дочерние объекты или отдельные трансформы)")]
-    public Transform[] gearPoints = new Transform[4];
-
-    [Header("Landing Target")]
-    [Tooltip("Точка посадки (Transform объекта)")]
+    [Header("Целевая точка посадки")]
     public Transform landingTargetTransform;
-
-    [Header("Ship Parameters")]
-    [Tooltip("Масса корабля (кг)")]
-    public double mass = 2200.0;
-
-    [Tooltip("Максимальная тяга по осям (X, Y, Z)")]
-    public Vector3 thrustPositive = new Vector3(20000f, 20000f, 50000f);
-
-    [Tooltip("Максимальная обратная тяга по осям (X, Y, Z)")]
-    public Vector3 thrustNegative = new Vector3(15000f, 15000f, 0f);
-
-    [Tooltip("Максимальная угловая скорость (рад/с)")]
-    public Vector3 angularRateLimit = new Vector3(0.05f, 0.05f, 0.08f);
-
-    [Tooltip("Ограничения ориентации (pitch, roll, yaw в радианах)")]
-    public Vector3 orientationLimits = new Vector3(0.35f, 0.35f, 3.14159f);
-
-    [Header("Rotation Smoothing")]
-    [Tooltip("Максимальная скорость поворота (градусов/сек). Чем меньше, тем плавнее разворот")]
-    [Range(1f, 180f)]
-    public float maxRotationSpeed = 30f;
-
-    [Tooltip("Минимальное расстояние для начала плавного разворота (метры)")]
-    public float smoothRotationStartDistance = 50f;
-
-    [Tooltip("Использовать только угловую скорость для поворота (не применять целевую ориентацию напрямую)")]
-    public bool useAngularVelocityOnly = true;
-
-    [Tooltip("Гравитация (X, Y, Z)")]
-    public Vector3 gravity = new Vector3(0f, 0f, -9.81f);
-
-    [Tooltip("Скорость ветра (X, Y, Z)")]
-    public Vector3 windVelocity = new Vector3(5f, 0f, 0f);
-
-    [Header("Simulation Settings")]
-    [Tooltip("Шаг времени симуляции (секунды)")]
-    public double simulationTimeStep = 0.05;
-
-        [Tooltip("Автоматически начинать посадку при старте")]
-        public bool autoStart = true;
-
-    [Tooltip("Показывать отладочную информацию")]
+    
+    public Vector3 landingTargetPosition = new Vector3(-3600f, 4500f, 0f);
+    
+    [Header("Параметры корабля")]
+    public ShipParametersData shipParameters = new ShipParametersData();
+    
+    [Header("Шасси")]
+    public List<Transform> gearObjects = new List<Transform>();
+    
+    [Header("Начальное состояние")]
+    [SerializeField]
+    private Vector3 initialPosition;
+    
+    public bool useCurrentPositionAsInitial = true;
+    
+    public Vector3 initialVelocity = new Vector3(1.8f, 50f, -60f);
+    
+    public Vector3 initialOrientation = new Vector3(0.30f, -0.18f, 0.2f);
+    
+    public bool useCurrentRotationAsInitial = false;
+    
+    public double initialFuel = 500.0;
+    
+    [Header("Сенсоры препятствий")]
+    public Transform frontSensor;
+    public Transform backSensor;
+    public Transform leftSensor;
+    public Transform rightSensor;
+    public Transform topSensor;
+    public Transform bottomSensor;
+    
+    [Header("Параметры сенсоров")]
+    public bool useTriggerDetection = true;
+    
+    public float sensorRange = 10f;
+    
+    public float obstacleIgnoreDistance = 20f;
+    
+    public LayerMask obstacleLayer = -1;
+    
+    [Header("Триггеры сенсоров")]
+    public Collider frontSensorCollider;
+    public Collider backSensorCollider;
+    public Collider leftSensorCollider;
+    public Collider rightSensorCollider;
+    public Collider topSensorCollider;
+    public Collider bottomSensorCollider;
+    
+    public bool autoCreateTriggers = true;
+    
+    public Vector3 triggerSize = new Vector3(1f, 1f, 5f);
+    
+    [Header("Настройки симуляции")]
+    public float simulationTimeStep = 0.05f;
+    
+    public float maxSpeed = 100f;
+    
+    public float maxSpeedNearObstacles = 30f;
+    
+    public bool autoStart = true;
+    
+    [Header("Визуализация")]
+    public bool showGearPoints = true;
+    
+    public Color gearPointColor = Color.red;
+    
+    public float gearPointSize = 0.2f;
+    
+    [Header("Отладочная информация")]
     public bool showDebugInfo = true;
-
-    private IntPtr landingSystemHandle = IntPtr.Zero;
-    private bool isInitialized = false;
+    
+    [Header("Визуализация квадрокоптера")]
+    public AL.PropellerRotation propellerRotation;
+    
+    private AL.LandingControlSystem controlSystem;
     private bool isLanding = false;
-    private AutoLanding.LandingStatusD currentStatus = AutoLanding.LandingStatusD.InFlight;
-    private Vector3 lastAppliedPosition = Vector3.zero;
-    private ulong lastStepNumber = 0;
-
-    // Вспомогательные функции для преобразования координат
-    // Unity использует левую систему координат (Y вверх), C++ использует правую систему (Z вверх)
-    private AutoLanding.Vector3D UnityToNative(Vector3 unityVec)
+    private double accumulatedTime = 0.0;
+    
+    private HashSet<Collider> frontObstacles = new HashSet<Collider>();
+    private AL.LazySequence<Vector3> landingTrajectory;
+    private AL.LazySequence<AL.ObstacleSensors> sensorHistory;
+    private HashSet<Collider> backObstacles = new HashSet<Collider>();
+    private HashSet<Collider> leftObstacles = new HashSet<Collider>();
+    private HashSet<Collider> rightObstacles = new HashSet<Collider>();
+    private HashSet<Collider> topObstacles = new HashSet<Collider>();
+    private HashSet<Collider> bottomObstacles = new HashSet<Collider>();
+    
+    void OnValidate()
     {
-        // Преобразование: Unity (X, Y, Z) -> Native (X, Z, Y)
-        // Y в Unity становится Z в Native (вертикальная ось)
-        return new AutoLanding.Vector3D
+        if (gearObjects != null && gearObjects.Count > 0 && shipParameters.gearPointsBody != null)
         {
-            x = unityVec.x,
-            y = unityVec.z,  // Unity Z -> Native Y
-            z = unityVec.y   // Unity Y -> Native Z (вертикальная ось)
-        };
-    }
-
-    private Vector3 NativeToUnity(AutoLanding.Vector3D nativeVec)
-    {
-        // Преобразование: Native (X, Y, Z) -> Unity (X, Y, Z)
-        // Z в Native становится Y в Unity (вертикальная ось)
-        return new Vector3(
-            (float)nativeVec.x,
-            (float)nativeVec.z,  // Native Z -> Unity Y (вертикальная ось)
-            (float)nativeVec.y    // Native Y -> Unity Z
-        );
-    }
-
-    // Преобразование Quaternion в pitch/roll/yaw
-    private AutoLanding.OrientationD QuaternionToOrientation(Quaternion quat)
-    {
-        // Unity использует левую систему координат
-        // Извлекаем углы Эйлера из Quaternion
-        Vector3 euler = quat.eulerAngles;
-        
-        // Конвертируем градусы в радианы и нормализуем углы
-        double pitch = (euler.x > 180f ? euler.x - 360f : euler.x) * Mathf.Deg2Rad;
-        double roll = (euler.z > 180f ? euler.z - 360f : euler.z) * Mathf.Deg2Rad;
-        double yaw = (euler.y > 180f ? euler.y - 360f : euler.y) * Mathf.Deg2Rad;
-        
-        return new AutoLanding.OrientationD { pitch = pitch, roll = roll, yaw = yaw };
-    }
-
-    // Преобразование pitch/roll/yaw в Quaternion
-    private Quaternion OrientationToQuaternion(AutoLanding.OrientationD ori)
-    {
-        // Конвертируем радианы в градусы
-        float pitch = (float)(ori.pitch * Mathf.Rad2Deg);
-        float roll = (float)(ori.roll * Mathf.Rad2Deg);
-        float yaw = (float)(ori.yaw * Mathf.Rad2Deg);
-        
-        // Unity использует порядок ZXY для углов Эйлера
-        return Quaternion.Euler(pitch, yaw, roll);
-    }
-
-    void Start()
-    {
-        // Если shipTransform не указан, используем текущий объект
-        if (shipTransform == null)
-        {
-            shipTransform = transform;
-        }
-
-        // Проверяем наличие всех необходимых объектов
-        if (shipTransform == null)
-        {
-            Debug.LogError("AutoLandingController: Ship Transform не указан!");
-            return;
-        }
-
-        if (gearPoints == null || gearPoints.Length != 4)
-        {
-            Debug.LogError("AutoLandingController: Необходимо указать 4 точки шасси!");
-            return;
-        }
-
-        for (int i = 0; i < 4; i++)
-        {
-            if (gearPoints[i] == null)
+            shipParameters.gearPointsBody.Clear();
+            foreach (var gearObject in gearObjects)
             {
-                Debug.LogError($"AutoLandingController: Точка шасси {i} не указана!");
-                return;
+                if (gearObject != null)
+                {
+                    Vector3 localPos = transform.InverseTransformPoint(gearObject.position);
+                    shipParameters.gearPointsBody.Add(localPos);
+                }
             }
         }
-
-        if (landingTargetTransform == null)
+        
+        if (useCurrentPositionAsInitial && Application.isPlaying == false)
         {
-            Debug.LogError("AutoLandingController: Landing Target Transform не указан!");
-            return;
+            initialPosition = transform.position;
         }
-
+    }
+    
+    void Start()
+    {
+        if (useTriggerDetection)
+        {
+            if (autoCreateTriggers)
+            {
+                if (frontSensorCollider == null && frontSensor != null)
+                    frontSensorCollider = CreateTriggerCollider(frontSensor, "front");
+                if (backSensorCollider == null && backSensor != null)
+                    backSensorCollider = CreateTriggerCollider(backSensor, "back");
+                if (leftSensorCollider == null && leftSensor != null)
+                    leftSensorCollider = CreateTriggerCollider(leftSensor, "left");
+                if (rightSensorCollider == null && rightSensor != null)
+                    rightSensorCollider = CreateTriggerCollider(rightSensor, "right");
+                if (topSensorCollider == null && topSensor != null)
+                    topSensorCollider = CreateTriggerCollider(topSensor, "top");
+                if (bottomSensorCollider == null && bottomSensor != null)
+                    bottomSensorCollider = CreateTriggerCollider(bottomSensor, "bottom");
+            }
+            
+            CheckTriggerSetup();
+            
+            InitializeSensorTriggers();
+        }
+        
+        InitializeSystem();
+        
         if (autoStart)
         {
             StartLanding();
         }
     }
-
-    void OnDestroy()
-    {
-        if (landingSystemHandle != IntPtr.Zero)
-        {
-            AutoLanding.LandingControlSystemNative.DestroyLandingSystem(landingSystemHandle);
-            landingSystemHandle = IntPtr.Zero;
-        }
-    }
-
-    public void StartLanding()
-    {
-        if (isLanding)
-        {
-            Debug.LogWarning("AutoLandingController: Посадка уже начата!");
-            return;
-        }
-
-        Debug.Log("AutoLandingController: Инициализация системы посадки...");
-        InitializeLandingSystem();
-        if (isInitialized)
-        {
-            isLanding = true;
-            Debug.Log("AutoLandingController: Посадка начата! Корабль начнет движение.");
-        }
-        else
-        {
-            Debug.LogError("AutoLandingController: Не удалось инициализировать систему посадки!");
-        }
-    }
-
-    public void StopLanding()
-    {
-        isLanding = false;
-        Debug.Log("AutoLandingController: Посадка остановлена!");
-    }
-
-    private void InitializeLandingSystem()
-    {
-        // Проверяем, что DLL доступна
-        try
-        {
-            AutoLanding.ShipParametersD testParams = new AutoLanding.ShipParametersD();
-            AutoLanding.ShipStateD testState = new AutoLanding.ShipStateD();
-            AutoLanding.LandingTargetD testTarget = new AutoLanding.LandingTargetD();
-            
-            IntPtr testHandle = AutoLanding.LandingControlSystemNative.CreateLandingSystem(
-                ref testParams,
-                ref testState,
-                ref testTarget);
-            if (testHandle != IntPtr.Zero)
-            {
-                AutoLanding.LandingControlSystemNative.DestroyLandingSystem(testHandle);
-            }
-        }
-        catch (DllNotFoundException)
-        {
-            Debug.LogError("AutoLandingController: DLL не найдена! Убедитесь, что библиотека скопирована в Assets/Plugins/");
-            isInitialized = false;
-            return;
-        }
-        catch (Exception e)
-        {
-            Debug.LogWarning($"AutoLandingController: Предупреждение при проверке DLL: {e.Message}");
-        }
-
-        try
-        {
-            // Получаем текущее состояние корабля из Unity
-            Vector3 shipPosition = shipTransform.position;
-            Quaternion shipRotation = shipTransform.rotation;
-            Rigidbody shipRigidbody = shipTransform.GetComponent<Rigidbody>();
-
-            // Создаем начальное состояние
-            AutoLanding.ShipStateD initialState = new AutoLanding.ShipStateD
-            {
-                position = UnityToNative(shipPosition),
-                orientation = QuaternionToOrientation(shipRotation),
-                velocity = UnityToNative(shipRigidbody != null ? shipRigidbody.linearVelocity : Vector3.zero),
-                acceleration = new AutoLanding.Vector3D { x = 0, y = 0, z = 0 },
-                angular_velocity = UnityToNative(shipRigidbody != null ? shipRigidbody.angularVelocity : Vector3.zero),
-                angular_acceleration = new AutoLanding.Vector3D { x = 0, y = 0, z = 0 },
-                dt = simulationTimeStep,
-                step = UIntPtr.Zero
-            };
-
-            // Создаем параметры корабля
-            AutoLanding.ShipParametersD parameters = new AutoLanding.ShipParametersD
-            {
-                thrust_positive = UnityToNative(thrustPositive),
-                thrust_negative = UnityToNative(thrustNegative),
-                attitude_thrust_positive = new AutoLanding.Vector3D { x = 5000, y = 5000, z = 3000 },
-                attitude_thrust_negative = new AutoLanding.Vector3D { x = 5000, y = 5000, z = 3000 },
-                angular_rate_limit = UnityToNative(angularRateLimit),
-                max_pitch = orientationLimits.x,
-                max_roll = orientationLimits.y,
-                max_yaw = orientationLimits.z,
-                gravity = UnityToNative(gravity),
-                wind_velocity = UnityToNative(windVelocity),
-                mass = mass,
-                default_dt = simulationTimeStep,
-                gear_points = new AutoLanding.Vector3D[4]
-            };
-
-            // Вычисляем локальные координаты шасси относительно центра масс корабля
-            for (int i = 0; i < 4; i++)
-            {
-                Vector3 localPos = shipTransform.InverseTransformPoint(gearPoints[i].position);
-                parameters.gear_points[i] = UnityToNative(localPos);
-            }
-
-            // Создаем целевую точку посадки
-            AutoLanding.LandingTargetD target = new AutoLanding.LandingTargetD
-            {
-                position = UnityToNative(landingTargetTransform.position),
-                orientation = QuaternionToOrientation(landingTargetTransform.rotation),
-                velocity = new AutoLanding.Vector3D { x = 0, y = 0, z = 0 },
-                acceleration = new AutoLanding.Vector3D { x = 0, y = 0, z = 0 },
-                angular_velocity = new AutoLanding.Vector3D { x = 0, y = 0, z = 0 },
-                angular_acceleration = new AutoLanding.Vector3D { x = 0, y = 0, z = 0 }
-            };
-
-            // Создаем систему управления посадкой
-            landingSystemHandle = AutoLanding.LandingControlSystemNative.CreateLandingSystem(
-                ref parameters,
-                ref initialState,
-                ref target);
-
-            if (landingSystemHandle == IntPtr.Zero)
-            {
-                Debug.LogError("AutoLandingController: Не удалось создать систему управления посадкой!");
-                isInitialized = false;
-                return;
-            }
-
-            isInitialized = true;
-            Vector3 startPos = shipTransform.position;
-            Vector3 targetPos = landingTargetTransform.position;
-            float distance = Vector3.Distance(startPos, targetPos);
-            
-            // Инициализируем отслеживание позиции
-            lastAppliedPosition = startPos;
-            lastStepNumber = 0;
-            
-            Debug.Log($"AutoLandingController: Система управления посадкой инициализирована! Handle: {landingSystemHandle}");
-            Debug.Log($"AutoLandingController: Начальная позиция корабля: {startPos}");
-            Debug.Log($"AutoLandingController: Целевая позиция: {targetPos}");
-            Debug.Log($"AutoLandingController: Расстояние до цели: {distance:F2} м");
-            
-            if (distance < 0.1f)
-            {
-                Debug.LogWarning("AutoLandingController: Корабль уже находится очень близко к цели! Возможно, нужно переместить корабль или цель.");
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"AutoLandingController: Ошибка при инициализации: {e.Message}");
-            isInitialized = false;
-        }
-    }
-
-    private int debugFrameCounter = 0;
     
-    void FixedUpdate()
+    private void InitializeSensorTriggers()
     {
-        if (!isInitialized || !isLanding || landingSystemHandle == IntPtr.Zero)
+        SetupSensorTrigger(frontSensorCollider, frontSensor, "front");
+        SetupSensorTrigger(backSensorCollider, backSensor, "back");
+        SetupSensorTrigger(leftSensorCollider, leftSensor, "left");
+        SetupSensorTrigger(rightSensorCollider, rightSensor, "right");
+        SetupSensorTrigger(topSensorCollider, topSensor, "top");
+        SetupSensorTrigger(bottomSensorCollider, bottomSensor, "bottom");
+    }
+    
+    private void SetupSensorTrigger(Collider collider, Transform sensorTransform, string direction)
+    {
+        if (collider != null && sensorTransform != null)
         {
-            // Выводим предупреждение только раз в секунду
-            if (debugFrameCounter % 50 == 0)
+            SensorTrigger sensorTrigger = sensorTransform.gameObject.GetComponent<SensorTrigger>();
+            if (sensorTrigger == null)
             {
-                if (!isInitialized) Debug.LogWarning("AutoLandingController: Система не инициализирована!");
-                else if (!isLanding) Debug.LogWarning($"AutoLandingController: Посадка не запущена! (isLanding={isLanding})");
-                else if (landingSystemHandle == IntPtr.Zero) Debug.LogError("AutoLandingController: Handle системы равен нулю!");
+                sensorTrigger = sensorTransform.gameObject.AddComponent<SensorTrigger>();
             }
-            debugFrameCounter++;
-            return;
+            sensorTrigger.controller = this;
+            sensorTrigger.sensorDirection = direction;
         }
-        
-        debugFrameCounter++;
-        
-        // Отладочная информация для первых кадров
-        if (debugFrameCounter <= 10)
+    }
+    
+    private Collider CreateTriggerCollider(Transform sensorTransform, string name)
+    {
+        BoxCollider trigger = sensorTransform.gameObject.GetComponent<BoxCollider>();
+        if (trigger == null)
         {
-            Debug.Log($"AutoLandingController: FixedUpdate вызван - isInitialized: {isInitialized}, isLanding: {isLanding}, handle: {landingSystemHandle}");
+            trigger = sensorTransform.gameObject.AddComponent<BoxCollider>();
         }
-
-        try
+        trigger.isTrigger = true;
+        trigger.size = triggerSize;
+        trigger.name = name + "_Trigger";
+        
+        SensorTrigger sensorTrigger = sensorTransform.gameObject.GetComponent<SensorTrigger>();
+        if (sensorTrigger == null)
         {
-            // ВАЖНО: НЕ вызываем SetLandingTarget каждый кадр, так как это переинициализирует последовательность
-            // и сбрасывает индекс шага обратно в 0!
-            // Обновляем целевую точку посадки только если она действительно изменилась
-            // (это можно сделать позже, если нужно)
-            
-            // Выполняем один шаг симуляции
-            AutoLanding.ShipStateD newState;
-            AutoLanding.LandingControlSystemNative.Step(landingSystemHandle, out newState);
-
-            // Применяем новое состояние к объекту в Unity
-            Vector3 targetPosition = NativeToUnity(newState.position);
-            Quaternion targetRotation = OrientationToQuaternion(newState.orientation);
-            Vector3 currentPosition = shipTransform.position;
-            
-            // Отладочная информация для первых нескольких шагов
-            ulong stepNumber = newState.step.ToUInt64();
-            
-            // Проверяем, действительно ли шаг увеличился
-            if (stepNumber == lastStepNumber)
+            sensorTrigger = sensorTransform.gameObject.AddComponent<SensorTrigger>();
+        }
+        sensorTrigger.controller = this;
+        sensorTrigger.sensorDirection = name.ToLower().Replace("sensor", "");
+        
+        return trigger;
+    }
+    
+    void CheckTriggerSetup()
+    {
+        if (frontSensorCollider != null && !frontSensorCollider.isTrigger)
+            Debug.LogWarning("frontSensorCollider должен иметь isTrigger = true для работы обнаружения препятствий!");
+        if (backSensorCollider != null && !backSensorCollider.isTrigger)
+            Debug.LogWarning("backSensorCollider должен иметь isTrigger = true для работы обнаружения препятствий!");
+        if (leftSensorCollider != null && !leftSensorCollider.isTrigger)
+            Debug.LogWarning("leftSensorCollider должен иметь isTrigger = true для работы обнаружения препятствий!");
+        if (rightSensorCollider != null && !rightSensorCollider.isTrigger)
+            Debug.LogWarning("rightSensorCollider должен иметь isTrigger = true для работы обнаружения препятствий!");
+        if (topSensorCollider != null && !topSensorCollider.isTrigger)
+            Debug.LogWarning("topSensorCollider должен иметь isTrigger = true для работы обнаружения препятствий!");
+        if (bottomSensorCollider != null && !bottomSensorCollider.isTrigger)
+            Debug.LogWarning("bottomSensorCollider должен иметь isTrigger = true для работы обнаружения препятствий!");
+    }
+    
+    public void OnSensorTriggerEnter(string direction, Collider obstacle)
+    {
+        if (!useTriggerDetection) return;
+        AddObstacle(direction, obstacle);
+    }
+    
+    public void OnSensorTriggerExit(string direction, Collider obstacle)
+    {
+        if (!useTriggerDetection) return;
+        if (obstacle == null) return;
+        
+        bool wasRemoved = RemoveObstacleFromAllDirections(obstacle);
+        
+        if (showDebugInfo && wasRemoved)
+        {
+            Debug.Log($"Препятствие {obstacle.name} удалено из всех направлений при выходе из {direction}");
+        }
+    }
+    
+    public void OnSensorTriggerStay(string direction, Collider obstacle)
+    {
+        if (!useTriggerDetection) return;
+        if (obstacle == null) return;
+        
+        if (obstacle.gameObject != null && obstacle.gameObject.activeInHierarchy)
+        {
+            Collider triggerCollider = GetTriggerColliderForDirection(direction);
+            if (triggerCollider != null && obstacle.bounds.Intersects(triggerCollider.bounds))
             {
-                Debug.LogWarning($"AutoLandingController: Шаг не увеличился! Текущий шаг: {stepNumber}, Последний шаг: {lastStepNumber}");
-            }
-            
-            // Проверяем, изменилась ли позиция в симуляции
-            float positionChange = Vector3.Distance(targetPosition, lastAppliedPosition);
-            if (stepNumber <= 10)
-            {
-                Debug.Log($"AutoLandingController: Шаг {stepNumber} - Позиция из симуляции: {targetPosition}, Последняя примененная позиция: {lastAppliedPosition}, Изменение: {positionChange:F4} м");
-            }
-            
-            lastStepNumber = stepNumber;
-            
-            // Отладочная информация (каждую секунду)
-            if (debugFrameCounter % 50 == 0)
-            {
-                Vector3 newVel = NativeToUnity(newState.velocity);
-                float distToTarget = Vector3.Distance(targetPosition, landingTargetTransform.position);
-                float posChange = Vector3.Distance(currentPosition, targetPosition);
-                Debug.Log($"AutoLandingController: Шаг {stepNumber} - Новая позиция: {targetPosition}, Текущая позиция: {currentPosition}, Изменение: {posChange:F4} м, Скорость: {newVel.magnitude:F2} м/с, Расстояние до цели: {distToTarget:F2} м");
-                
-                // Проверяем, применилась ли позиция после изменения
-                Vector3 actualPos = shipTransform.position;
-                float actualChange = Vector3.Distance(actualPos, targetPosition);
-                if (actualChange > 0.01f)
-                {
-                    Debug.LogWarning($"AutoLandingController: Позиция не применилась! Ожидалось: {targetPosition}, Фактически: {actualPos}, Разница: {actualChange:F4} м");
-                }
-            }
-            
-            // ВСЕГДА используем прямое изменение transform.position
-            // MovePosition может не работать правильно в некоторых случаях
-            Vector3 oldPos = shipTransform.position;
-            shipTransform.position = targetPosition;
-            
-            // Применяем ориентацию постепенно через угловую скорость вместо прямого изменения
-            // Это позволяет кораблю плавно разворачиваться к цели, а не мгновенно
-            Vector3 angularVelocity = NativeToUnity(newState.angular_velocity);
-            Vector3 linearVelocity = NativeToUnity(newState.velocity);
-            
-            // Вычисляем расстояние до цели для плавного разворота
-            float distanceToTarget = Vector3.Distance(targetPosition, landingTargetTransform.position);
-            float rotationSpeedMultiplier = 1f;
-            
-            // Чем дальше от цели, тем медленнее разворот (для более плавного движения)
-            if (distanceToTarget > smoothRotationStartDistance)
-            {
-                // На больших расстояниях замедляем разворот
-                rotationSpeedMultiplier = Mathf.Clamp01(smoothRotationStartDistance / distanceToTarget);
-            }
-            
-            Rigidbody rb = shipTransform.GetComponent<Rigidbody>();
-            if (rb != null)
-            {
-                // Если есть Rigidbody, применяем скорости для физики
-                rb.linearVelocity = linearVelocity;
-                
-                if (useAngularVelocityOnly)
-                {
-                    // ВАРИАНТ 1: Используем ТОЛЬКО угловую скорость из симуляции
-                    // Это позволяет кораблю естественно разворачиваться постепенно
-                    // Ограничиваем угловую скорость для более плавного поворота
-                    Vector3 limitedAngularVelocity = angularVelocity * rotationSpeedMultiplier;
-                    
-                    // Дополнительно ограничиваем максимальную скорость поворота
-                    float currentAngularSpeed = limitedAngularVelocity.magnitude * Mathf.Rad2Deg;
-                    if (currentAngularSpeed > maxRotationSpeed)
-                    {
-                        limitedAngularVelocity = limitedAngularVelocity.normalized * (maxRotationSpeed * Mathf.Deg2Rad);
-                    }
-                    
-                    rb.angularVelocity = limitedAngularVelocity;
-                    
-                    // НЕ применяем ориентацию напрямую - пусть физика делает свою работу
-                    // Корабль будет поворачиваться естественно через угловую скорость
-                }
-                else
-                {
-                    // ВАРИАНТ 2: Применяем ориентацию постепенно с ограничением скорости
-                    rb.angularVelocity = angularVelocity;
-                    
-                    Quaternion currentRot = shipTransform.rotation;
-                    
-                    // Вычисляем максимальный поворот за кадр с учетом расстояния до цели
-                    float rotationSpeed = angularVelocity.magnitude * Mathf.Rad2Deg * rotationSpeedMultiplier;
-                    float maxRotationPerFrame = Mathf.Min(rotationSpeed * Time.fixedDeltaTime, maxRotationSpeed * Time.fixedDeltaTime);
-                    
-                    if (maxRotationPerFrame > 0.1f)
-                    {
-                        // Поворачиваем постепенно с учетом ограничений
-                        shipTransform.rotation = Quaternion.RotateTowards(currentRot, targetRotation, maxRotationPerFrame);
-                    }
-                    else
-                    {
-                        // Если угловая скорость очень мала, применяем ориентацию напрямую
-                        shipTransform.rotation = targetRotation;
-                    }
-                }
+                AddObstacle(direction, obstacle);
             }
             else
             {
-                // Если нет Rigidbody, применяем ориентацию постепенно
-                Quaternion currentRot = shipTransform.rotation;
-                
-                // Вычисляем максимальный поворот за кадр с учетом расстояния до цели
-                float rotationSpeed = angularVelocity.magnitude * Mathf.Rad2Deg * rotationSpeedMultiplier;
-                float maxRotationPerFrame = Mathf.Min(rotationSpeed * Time.fixedDeltaTime, maxRotationSpeed * Time.fixedDeltaTime);
-                
-                if (maxRotationPerFrame > 0.1f)
-                {
-                    // Поворачиваем постепенно с учетом ограничений
-                    shipTransform.rotation = Quaternion.RotateTowards(currentRot, targetRotation, maxRotationPerFrame);
-                }
-                else
-                {
-                    // Если угловая скорость очень мала, применяем напрямую
-                    shipTransform.rotation = targetRotation;
-                }
+                RemoveObstacle(direction, obstacle);
+            }
+        }
+        else
+        {
+            RemoveObstacleFromAllDirections(obstacle);
+        }
+    }
+    
+    private Collider GetTriggerColliderForDirection(string direction)
+    {
+        switch (direction)
+        {
+            case "front": return frontSensorCollider;
+            case "back": return backSensorCollider;
+            case "left": return leftSensorCollider;
+            case "right": return rightSensorCollider;
+            case "top": return topSensorCollider;
+            case "bottom": return bottomSensorCollider;
+            default: return null;
+        }
+    }
+    
+    private void RemoveObstacle(string direction, Collider obstacle)
+    {
+        if (obstacle == null) return;
+        
+        switch (direction)
+        {
+            case "front":
+                frontObstacles.Remove(obstacle);
+                break;
+            case "back":
+                backObstacles.Remove(obstacle);
+                break;
+            case "left":
+                leftObstacles.Remove(obstacle);
+                break;
+            case "right":
+                rightObstacles.Remove(obstacle);
+                break;
+            case "top":
+                topObstacles.Remove(obstacle);
+                break;
+            case "bottom":
+                bottomObstacles.Remove(obstacle);
+                break;
+        }
+    }
+    
+    private bool RemoveObstacleFromAllDirections(Collider obstacle)
+    {
+        if (obstacle == null) return false;
+        
+        bool removed = false;
+        removed |= frontObstacles.Remove(obstacle);
+        removed |= backObstacles.Remove(obstacle);
+        removed |= leftObstacles.Remove(obstacle);
+        removed |= rightObstacles.Remove(obstacle);
+        removed |= topObstacles.Remove(obstacle);
+        removed |= bottomObstacles.Remove(obstacle);
+        
+        return removed;
+    }
+    
+    private void AddObstacle(string direction, Collider obstacle)
+    {
+        if (obstacle == null || obstacle.gameObject == null)
+            return;
+        
+        if (obstacle.transform.IsChildOf(transform) || obstacle.transform == transform)
+            return;
+        
+        if (obstacleLayer != -1 && (obstacleLayer.value & (1 << obstacle.gameObject.layer)) == 0)
+            return;
+        
+        switch (direction)
+        {
+            case "front":
+                frontObstacles.Add(obstacle);
+                break;
+            case "back":
+                backObstacles.Add(obstacle);
+                break;
+            case "left":
+                leftObstacles.Add(obstacle);
+                break;
+            case "right":
+                rightObstacles.Add(obstacle);
+                break;
+            case "top":
+                topObstacles.Add(obstacle);
+                break;
+            case "bottom":
+                bottomObstacles.Add(obstacle);
+                break;
+        }
+    }
+    
+    void Update()
+    {
+        if (isLanding)
+        {
+            if (useTriggerDetection)
+            {
+                CleanupInactiveObstacles();
             }
             
-            // Сохраняем примененную позицию для следующего кадра
-            lastAppliedPosition = targetPosition;
+            accumulatedTime += Time.deltaTime;
             
-            // Проверяем, действительно ли позиция изменилась
-            Vector3 newActualPos = shipTransform.position;
-            if (stepNumber <= 10)
+            while (accumulatedTime >= simulationTimeStep)
             {
-                float posDiff = Vector3.Distance(oldPos, newActualPos);
-                float expectedDiff = Vector3.Distance(oldPos, targetPosition);
-                Debug.Log($"AutoLandingController: Шаг {stepNumber} - Старая позиция: {oldPos}, Новая позиция: {newActualPos}, Ожидалось изменение: {expectedDiff:F4} м, Фактическое изменение: {posDiff:F4} м");
-                
-                if (Mathf.Abs(expectedDiff - posDiff) > 0.01f)
-                {
-                    Debug.LogWarning($"AutoLandingController: Позиция не применилась правильно! Разница: {Mathf.Abs(expectedDiff - posDiff):F4} м");
-                }
+                UpdateSimulation(simulationTimeStep);
+                accumulatedTime -= simulationTimeStep;
             }
             
-            // Скорость уже применена выше при обработке ориентации
+            UpdateUnityTransform();
             
-            // Проверяем, действительно ли позиция изменилась
-            if (debugFrameCounter % 50 == 0)
+            CheckLandingStatus();
+        }
+    }
+    
+    private void CleanupInactiveObstacles()
+    {
+        var frontToRemove = new System.Collections.Generic.List<Collider>();
+        var backToRemove = new System.Collections.Generic.List<Collider>();
+        var leftToRemove = new System.Collections.Generic.List<Collider>();
+        var rightToRemove = new System.Collections.Generic.List<Collider>();
+        var topToRemove = new System.Collections.Generic.List<Collider>();
+        var bottomToRemove = new System.Collections.Generic.List<Collider>();
+        
+        foreach (var c in frontObstacles)
+        {
+            if (c == null || !c.gameObject.activeInHierarchy)
+                frontToRemove.Add(c);
+        }
+        foreach (var c in backObstacles)
+        {
+            if (c == null || !c.gameObject.activeInHierarchy)
+                backToRemove.Add(c);
+        }
+        foreach (var c in leftObstacles)
+        {
+            if (c == null || !c.gameObject.activeInHierarchy)
+                leftToRemove.Add(c);
+        }
+        foreach (var c in rightObstacles)
+        {
+            if (c == null || !c.gameObject.activeInHierarchy)
+                rightToRemove.Add(c);
+        }
+        foreach (var c in topObstacles)
+        {
+            if (c == null || !c.gameObject.activeInHierarchy)
+                topToRemove.Add(c);
+        }
+        foreach (var c in bottomObstacles)
+        {
+            if (c == null || !c.gameObject.activeInHierarchy)
+                bottomToRemove.Add(c);
+        }
+        
+        foreach (var c in frontToRemove) frontObstacles.Remove(c);
+        foreach (var c in backToRemove) backObstacles.Remove(c);
+        foreach (var c in leftToRemove) leftObstacles.Remove(c);
+        foreach (var c in rightToRemove) rightObstacles.Remove(c);
+        foreach (var c in topToRemove) topObstacles.Remove(c);
+        foreach (var c in bottomToRemove) bottomObstacles.Remove(c);
+    }
+    
+    void OnDrawGizmos()
+    {
+        if (showGearPoints)
+        {
+            Gizmos.color = gearPointColor;
+            
+            if (controlSystem != null)
             {
-                Vector3 actualPosition = shipTransform.position;
-                float actualChange = Vector3.Distance(currentPosition, actualPosition);
-                if (actualChange < 0.001f && Vector3.Distance(targetPosition, currentPosition) > 0.1f)
+                var gearPoints = controlSystem.GetGearPointsWorld();
+                foreach (var point in gearPoints)
                 {
-                    Debug.LogWarning($"AutoLandingController: Позиция не изменилась! Ожидалось: {targetPosition}, Получилось: {actualPosition}");
+                    Gizmos.DrawSphere(point.ToUnityVector3(), gearPointSize);
                 }
             }
-
-            // Проверяем статус посадки
-            currentStatus = AutoLanding.LandingControlSystemNative.GetStatus(landingSystemHandle);
-            
-            // Отладочная информация для первых нескольких шагов
-            if (stepNumber <= 5)
+            else if (gearObjects != null && gearObjects.Count > 0)
             {
-                Debug.Log($"AutoLandingController: Шаг {stepNumber} - Статус: {currentStatus}, isLanding: {isLanding}");
-            }
-            
-            // Не останавливаем посадку слишком рано - проверяем расстояние до цели
-            // Используем уже вычисленное расстояние distanceToTarget из строки 527
-            
-            if (currentStatus == AutoLanding.LandingStatusD.Landed)
-            {
-                if (distanceToTarget < 1.0f) // Только если действительно близко к цели
+                foreach (var gearObject in gearObjects)
                 {
-                    Debug.Log($"AutoLandingController: Посадка успешно завершена на шаге {stepNumber}!");
-                    isLanding = false;
-                }
-                else
-                {
-                    // Статус Landed, но мы еще далеко - продолжаем движение
-                    if (stepNumber <= 10)
+                    if (gearObject != null)
                     {
-                        Debug.LogWarning($"AutoLandingController: Статус Landed на шаге {stepNumber}, но расстояние до цели: {distanceToTarget:F2} м. Продолжаем движение.");
+                        Gizmos.DrawSphere(gearObject.position, gearPointSize);
+                        Gizmos.DrawLine(transform.position, gearObject.position);
                     }
                 }
             }
-            else if (currentStatus == AutoLanding.LandingStatusD.Crashed)
+            else if (shipParameters.gearPointsBody != null && shipParameters.gearPointsBody.Count > 0)
             {
-                Debug.LogWarning($"AutoLandingController: Корабль разбился на шаге {stepNumber}!");
-                isLanding = false;
+                foreach (var localPoint in shipParameters.gearPointsBody)
+                {
+                    Vector3 worldPoint = transform.TransformPoint(localPoint);
+                    Gizmos.DrawSphere(worldPoint, gearPointSize);
+                    Gizmos.DrawLine(transform.position, worldPoint);
+                }
             }
         }
-        catch (Exception e)
+        
+        if (isLanding)
         {
-            Debug.LogError($"AutoLandingController: Ошибка при выполнении шага симуляции: {e.Message}");
+            if (useTriggerDetection)
+            {
+                Gizmos.color = Color.yellow;
+                DrawTriggerCollider(frontSensorCollider);
+                DrawTriggerCollider(backSensorCollider);
+                DrawTriggerCollider(leftSensorCollider);
+                DrawTriggerCollider(rightSensorCollider);
+                DrawTriggerCollider(topSensorCollider);
+                DrawTriggerCollider(bottomSensorCollider);
+                
+                Gizmos.color = Color.red;
+                if (frontObstacles.Count > 0) DrawObstacles(frontObstacles);
+                if (backObstacles.Count > 0) DrawObstacles(backObstacles);
+                if (leftObstacles.Count > 0) DrawObstacles(leftObstacles);
+                if (rightObstacles.Count > 0) DrawObstacles(rightObstacles);
+                if (topObstacles.Count > 0) DrawObstacles(topObstacles);
+                if (bottomObstacles.Count > 0) DrawObstacles(bottomObstacles);
+            }
+            else
+            {
+                Gizmos.color = Color.yellow;
+                DrawSensor(frontSensor);
+                DrawSensor(backSensor);
+                DrawSensor(leftSensor);
+                DrawSensor(rightSensor);
+                DrawSensor(topSensor);
+                DrawSensor(bottomSensor);
+            }
         }
     }
-
+    
     void OnGUI()
     {
-        if (!showDebugInfo || !isInitialized)
+        if (showDebugInfo && isLanding && controlSystem != null)
         {
+            var state = controlSystem.GetState();
+            var status = controlSystem.EvaluateStatus();
+            var target = controlSystem.GetLandingTarget();
+            
+            AL.Vector3D posErr = target.pose.position - state.pose.position;
+            double distance = posErr.Length;
+            double distanceXY = Math.Sqrt(posErr.x * posErr.x + posErr.y * posErr.y);
+            
+            GUILayout.BeginArea(new Rect(10, 10, 400, 250));
+            GUILayout.Box("Информация о посадке");
+            GUILayout.Label($"Статус: {status}");
+            GUILayout.Label($"Позиция (система): ({state.pose.position.x:F2}, {state.pose.position.y:F2}, {state.pose.position.z:F2})");
+            GUILayout.Label($"Позиция Unity: ({transform.position.x:F2}, {transform.position.y:F2}, {transform.position.z:F2})");
+            GUILayout.Label($"Цель (система): ({target.pose.position.x:F2}, {target.pose.position.y:F2}, {target.pose.position.z:F2})");
+            if (landingTargetTransform != null)
+            {
+                GUILayout.Label($"Цель Unity: ({landingTargetTransform.position.x:F2}, {landingTargetTransform.position.y:F2}, {landingTargetTransform.position.z:F2})");
+            }
+            GUILayout.Label($"Расстояние до цели: {distance:F2}");
+            GUILayout.Label($"Расстояние XY: {distanceXY:F2}");
+            double currentSpeed = state.motion.velocity.Length;
+            GUILayout.Label($"Скорость: ({state.motion.velocity.x:F2}, {state.motion.velocity.y:F2}, {state.motion.velocity.z:F2})");
+            GUILayout.Label($"Модуль скорости: {currentSpeed:F2}");
+            bool hasObstacles = useTriggerDetection && (
+                frontObstacles.Count > 0 || backObstacles.Count > 0 || 
+                leftObstacles.Count > 0 || rightObstacles.Count > 0 || 
+                topObstacles.Count > 0 || bottomObstacles.Count > 0);
+            GUILayout.Label($"Препятствия обнаружены: {hasObstacles}");
+            GUILayout.Label($"Макс. скорость: {(hasObstacles ? maxSpeedNearObstacles : maxSpeed):F2}");
+            GUILayout.Label($"Расстояние игнорирования препятствий: {obstacleIgnoreDistance:F2}m");
+            
+            if (hasObstacles && useTriggerDetection)
+            {
+                float minDistance = float.MaxValue;
+                string closestDirection = "нет";
+                if (frontObstacles.Count > 0)
+                {
+                    float dist = GetClosestObstacleDistance(frontObstacles);
+                    if (dist < minDistance) { minDistance = dist; closestDirection = "Front"; }
+                }
+                if (backObstacles.Count > 0)
+                {
+                    float dist = GetClosestObstacleDistance(backObstacles);
+                    if (dist < minDistance) { minDistance = dist; closestDirection = "Back"; }
+                }
+                if (leftObstacles.Count > 0)
+                {
+                    float dist = GetClosestObstacleDistance(leftObstacles);
+                    if (dist < minDistance) { minDistance = dist; closestDirection = "Left"; }
+                }
+                if (rightObstacles.Count > 0)
+                {
+                    float dist = GetClosestObstacleDistance(rightObstacles);
+                    if (dist < minDistance) { minDistance = dist; closestDirection = "Right"; }
+                }
+                if (topObstacles.Count > 0)
+                {
+                    float dist = GetClosestObstacleDistance(topObstacles);
+                    if (dist < minDistance) { minDistance = dist; closestDirection = "Top"; }
+                }
+                if (bottomObstacles.Count > 0)
+                {
+                    float dist = GetClosestObstacleDistance(bottomObstacles);
+                    if (dist < minDistance) { minDistance = dist; closestDirection = "Bottom"; }
+                }
+                if (minDistance < float.MaxValue)
+                {
+                    GUILayout.Label($"Ближайшее препятствие ({closestDirection}): {minDistance:F2}m");
+                }
+            }
+            
+            GUILayout.Label($"Топливо: {state.fuel:F2}");
+            GUILayout.Label($"Ориентация: Pitch={state.pose.orientation.pitch:F3}, Roll={state.pose.orientation.roll:F3}, Yaw={state.pose.orientation.yaw:F3}");
+            
+            var env = controlSystem.GetParameters().environment;
+            Vector3 windVelUnity = env.wind_velocity.ToUnityVector3();
+            AL.Vector3D relativeWind = state.motion.velocity - env.wind_velocity;
+            double relativeWindSpeed = relativeWind.Length;
+            double dragForce = 0.5 * env.air_density * relativeWindSpeed * relativeWindSpeed * 
+                             env.cross_sectional_area * env.drag_coefficient;
+            
+            GUILayout.Label($"Ветер: ({windVelUnity.x:F2}, {windVelUnity.y:F2}, {windVelUnity.z:F2}) м/с");
+            GUILayout.Label($"Относительная скорость ветра: {relativeWindSpeed:F2} м/с");
+            GUILayout.Label($"Сила сопротивления: {dragForce:F2} Н");
+            GUILayout.EndArea();
+        }
+    }
+    
+    public void InitializeSystem()
+    {
+        AL.Vector3D startPos;
+        if (useCurrentPositionAsInitial)
+        {
+            startPos = AL.Vector3D.FromUnityVector3(transform.position);
+            initialPosition = transform.position;
+        }
+        else if (initialPosition != Vector3.zero)
+        {
+            startPos = AL.Vector3D.FromUnityVector3(initialPosition);
+        }
+        else
+        {
+            startPos = AL.Vector3D.FromUnityVector3(transform.position);
+            initialPosition = transform.position;
+        }
+        
+        AL.Orientation startOrientation;
+        if (useCurrentRotationAsInitial)
+        {
+            Vector3 euler = transform.rotation.eulerAngles;
+            double pitch = NormalizeAngle(euler.x) * Mathf.Deg2Rad;
+            double roll = NormalizeAngle(euler.z) * Mathf.Deg2Rad;
+            double yaw = NormalizeAngle(euler.y) * Mathf.Deg2Rad;
+            startOrientation = new AL.Orientation(pitch, roll, yaw);
+            initialOrientation = new Vector3((float)pitch, (float)roll, (float)yaw);
+        }
+        else
+        {
+            startOrientation = new AL.Orientation(initialOrientation.x, initialOrientation.y, initialOrientation.z);
+        }
+        
+        AL.ShipParameters params_ = ConvertShipParameters();
+        
+        AL.Pose initialPose = new AL.Pose(startPos, startOrientation);
+        
+        AL.MotionState initialMotion = new AL.MotionState(
+            AL.Vector3D.FromUnityVector3(initialVelocity),
+            new AL.Vector3D(0, 0, 0),
+            new AL.Vector3D(0, 0, 0),
+            new AL.Vector3D(0, 0, 0)
+        );
+        
+        AL.ShipState initialState = new AL.ShipState(initialPose, initialMotion, initialFuel);
+        
+        AL.LandingTarget target;
+        if (landingTargetTransform != null)
+        {
+            AL.Vector3D targetPos = AL.Vector3D.FromUnityVector3(landingTargetTransform.position);
+            target = new AL.LandingTarget(new AL.Pose(targetPos, new AL.Orientation(0, 0, 0)));
+        }
+        else
+        {
+            AL.Vector3D targetPos = AL.Vector3D.FromUnityVector3(landingTargetPosition);
+            target = new AL.LandingTarget(new AL.Pose(targetPos, new AL.Orientation(0, 0, 0)));
+        }
+        
+        controlSystem = new AL.LandingControlSystem(params_, initialState, target);
+        
+        UpdateUnityTransform();
+    }
+    
+    public void StartLanding()
+    {
+        if (controlSystem == null)
+        {
+            InitializeSystem();
+        }
+        
+        isLanding = true;
+        accumulatedTime = 0.0;
+    }
+    
+    public void StopLanding()
+    {
+        isLanding = false;
+    }
+    
+    public void ResetLanding()
+    {
+        isLanding = false;
+        accumulatedTime = 0.0;
+        landingTrajectory = null;
+        sensorHistory = null;
+        InitializeSystem();
+    }
+    
+    private void UpdateSimulation(double dt)
+    {
+        if (controlSystem == null) return;
+        
+        AL.ObstacleSensors sensors = ReadSensors();
+        
+        if (sensorHistory == null)
+        {
+            sensorHistory = new AL.LazySequence<AL.ObstacleSensors>(new AL.ArraySequence<AL.ObstacleSensors>());
+        }
+        sensorHistory = (AL.LazySequence<AL.ObstacleSensors>)sensorHistory.Append(sensors);
+        
+        AL.ShipState currentState = controlSystem.GetState();
+        AL.ShipParameters currentParams = controlSystem.GetParameters();
+        
+        currentParams.environment.wind_velocity = AL.Vector3D.FromUnityVector3(shipParameters.environment.windVelocity);
+        currentParams.environment.air_density = shipParameters.environment.airDensity;
+        currentParams.environment.drag_coefficient = shipParameters.environment.dragCoefficient;
+        currentParams.environment.cross_sectional_area = shipParameters.environment.crossSectionalArea;
+        
+        bool hasObstacles = (useTriggerDetection && (
+            frontObstacles.Count > 0 || backObstacles.Count > 0 || 
+            leftObstacles.Count > 0 || rightObstacles.Count > 0 || 
+            topObstacles.Count > 0 || bottomObstacles.Count > 0)) ||
+            (!useTriggerDetection && (sensors.front || sensors.back || sensors.left || sensors.right || sensors.top || sensors.bottom));
+        
+        if (hasObstacles)
+        {
+            currentParams.max_speed = maxSpeedNearObstacles;
+        }
+        else
+        {
+            currentParams.max_speed = maxSpeed > 0 ? maxSpeed : 0;
+        }
+        
+        controlSystem.UpdateParameters(currentParams);
+        
+        AL.LandingTarget currentTarget = controlSystem.GetLandingTarget();
+        
+        AL.ControlInput controlInput = AL.ControlLaw.DefaultControlLaw(
+            currentState,
+            currentParams,
+            currentTarget,
+            sensors
+        );
+        
+        controlSystem.Integrate(controlInput, dt);
+        
+        if (landingTrajectory == null)
+        {
+            Vector3[] initialPos = { transform.position };
+            landingTrajectory = new AL.LazySequence<Vector3>(initialPos);
+        }
+        
+        AL.ShipState newState = controlSystem.GetState();
+        Vector3 newPosition = newState.pose.position.ToUnityVector3();
+        landingTrajectory = (AL.LazySequence<Vector3>)landingTrajectory.Append(newPosition);
+    }
+    
+    private void UpdateUnityTransform()
+    {
+        if (controlSystem == null) return;
+        
+        AL.ShipState state = controlSystem.GetState();
+        
+        transform.position = state.pose.position.ToUnityVector3();
+        
+        Quaternion rotation = Quaternion.Euler(
+            (float)(state.pose.orientation.pitch * Mathf.Rad2Deg),
+            (float)(state.pose.orientation.yaw * Mathf.Rad2Deg),
+            (float)(state.pose.orientation.roll * Mathf.Rad2Deg)
+        );
+        transform.rotation = rotation;
+    }
+    
+    private AL.ObstacleSensors ReadSensors()
+    {
+        AL.ObstacleSensors sensors = new AL.ObstacleSensors();
+        
+        if (useTriggerDetection)
+        {
+            CleanupInactiveObstacles();
+            
+            VerifyObstaclesInTriggers();
+            
+            sensors.front = CheckObstaclesWithinDistance(frontObstacles, frontSensorCollider);
+            sensors.back = CheckObstaclesWithinDistance(backObstacles, backSensorCollider);
+            sensors.left = CheckObstaclesWithinDistance(leftObstacles, leftSensorCollider);
+            sensors.right = CheckObstaclesWithinDistance(rightObstacles, rightSensorCollider);
+            sensors.top = CheckObstaclesWithinDistance(topObstacles, topSensorCollider);
+            sensors.bottom = CheckObstaclesWithinDistance(bottomObstacles, bottomSensorCollider);
+            
+            if (showDebugInfo && (sensors.front || sensors.back || sensors.left || sensors.right || sensors.top || sensors.bottom))
+            {
+                Debug.Log($"Обнаружены препятствия (в пределах {obstacleIgnoreDistance}m): Front={sensors.front}, " +
+                         $"Back={sensors.back}, Left={sensors.left}, Right={sensors.right}, " +
+                         $"Top={sensors.top}, Bottom={sensors.bottom}");
+            }
+        }
+        else
+        {
+            sensors.front = CheckSensor(frontSensor, transform.forward);
+            sensors.back = CheckSensor(backSensor, -transform.forward);
+            sensors.left = CheckSensor(leftSensor, -transform.right);
+            sensors.right = CheckSensor(rightSensor, transform.right);
+            sensors.top = CheckSensor(topSensor, transform.up);
+            sensors.bottom = CheckSensor(bottomSensor, -transform.up);
+        }
+        
+        return sensors;
+    }
+    
+    private bool CheckObstaclesWithinDistance(HashSet<Collider> obstacles, Collider triggerCollider)
+    {
+        if (obstacles == null || obstacles.Count == 0)
+            return false;
+        
+        if (obstacleIgnoreDistance <= 0)
+        {
+            return obstacles.Count > 0;
+        }
+        
+        Vector3 shipPosition = transform.position;
+        
+        foreach (var obstacle in obstacles)
+        {
+            if (obstacle == null || !obstacle.gameObject.activeInHierarchy)
+                continue;
+            
+            Vector3 obstaclePosition = obstacle.bounds.center;
+            float distance = Vector3.Distance(shipPosition, obstaclePosition);
+            
+            if (distance <= obstacleIgnoreDistance)
+            {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    private float GetClosestObstacleDistance(HashSet<Collider> obstacles)
+    {
+        if (obstacles == null || obstacles.Count == 0)
+            return float.MaxValue;
+        
+        Vector3 shipPosition = transform.position;
+        float minDistance = float.MaxValue;
+        
+        foreach (var obstacle in obstacles)
+        {
+            if (obstacle == null || !obstacle.gameObject.activeInHierarchy)
+                continue;
+            
+            Vector3 obstaclePosition = obstacle.bounds.center;
+            float distance = Vector3.Distance(shipPosition, obstaclePosition);
+            
+            if (distance < minDistance)
+            {
+                minDistance = distance;
+            }
+        }
+        
+        return minDistance;
+    }
+    
+    private void VerifyObstaclesInTriggers()
+    {
+        VerifyObstaclesInTrigger(frontObstacles, frontSensorCollider, "front");
+        VerifyObstaclesInTrigger(backObstacles, backSensorCollider, "back");
+        VerifyObstaclesInTrigger(leftObstacles, leftSensorCollider, "left");
+        VerifyObstaclesInTrigger(rightObstacles, rightSensorCollider, "right");
+        VerifyObstaclesInTrigger(topObstacles, topSensorCollider, "top");
+        VerifyObstaclesInTrigger(bottomObstacles, bottomSensorCollider, "bottom");
+    }
+    
+    private void VerifyObstaclesInTrigger(HashSet<Collider> obstacles, Collider triggerCollider, string direction)
+    {
+        if (triggerCollider == null)
+        {
+            if (obstacles.Count > 0)
+            {
+                obstacles.Clear();
+                if (showDebugInfo)
+                {
+                    Debug.Log($"Все препятствия направления {direction} удалены (триггер отсутствует)");
+                }
+            }
             return;
         }
-
-        GUILayout.BeginArea(new Rect(10, 10, 300, 200));
-        GUILayout.Box("Auto Landing Debug Info");
-        GUILayout.Label($"Status: {currentStatus}");
-        GUILayout.Label($"Is Landing: {isLanding}");
         
-        if (landingSystemHandle != IntPtr.Zero)
+        var toRemove = new System.Collections.Generic.List<Collider>();
+        foreach (var obstacle in obstacles)
         {
-            AutoLanding.ShipStateD state;
-            AutoLanding.LandingControlSystemNative.GetCurrentState(landingSystemHandle, out state);
-            GUILayout.Label($"Position: ({state.position.x:F2}, {state.position.y:F2}, {state.position.z:F2})");
-            GUILayout.Label($"Velocity: ({state.velocity.x:F2}, {state.velocity.y:F2}, {state.velocity.z:F2})");
+            if (obstacle == null || !obstacle.gameObject.activeInHierarchy)
+            {
+                toRemove.Add(obstacle);
+            }
+            else
+            {
+                bool intersects = obstacle.bounds.Intersects(triggerCollider.bounds);
+                if (!intersects)
+                {
+                    toRemove.Add(obstacle);
+                }
+            }
         }
         
-        GUILayout.EndArea();
+        foreach (var obstacle in toRemove)
+        {
+            obstacles.Remove(obstacle);
+            if (showDebugInfo)
+            {
+                Debug.Log($"Препятствие {obstacle?.name ?? "null"} удалено из {direction} при проверке пересечения");
+            }
+        }
+    }
+    
+    private bool CheckSensor(Transform sensorTransform, Vector3 direction)
+    {
+        if (sensorTransform == null)
+        {
+            return Physics.Raycast(transform.position, direction, sensorRange, obstacleLayer);
+        }
+        else
+        {
+            return Physics.Raycast(sensorTransform.position, direction, sensorRange, obstacleLayer);
+        }
+    }
+    
+    private void CheckLandingStatus()
+    {
+        if (controlSystem == null) return;
+        
+        AL.LandingStatus status = controlSystem.EvaluateStatus();
+        AL.ShipState state = controlSystem.GetState();
+        
+        if (status == AL.LandingStatus.Landed)
+        {
+            isLanding = false;
+            Debug.Log($"Посадка завершена! Остаток топлива: {state.fuel:F2}");
+        }
+        else if (state.fuel <= 0.0 && state.pose.position.z > 0.1)
+        {
+            isLanding = false;
+            Debug.LogWarning($"КРАХ: Закончилось топливо на высоте {state.pose.position.z:F2}");
+        }
+    }
+    
+    private AL.ShipParameters ConvertShipParameters()
+    {
+        AL.ShipParameters params_ = new AL.ShipParameters();
+        
+        params_.mass = shipParameters.mass;
+        params_.thrust = new AL.ThrustProfile(
+            AL.Vector3D.FromUnityVector3(shipParameters.thrust.positive),
+            AL.Vector3D.FromUnityVector3(shipParameters.thrust.negative)
+        );
+        params_.attitude_thrust = new AL.ThrustProfile(
+            AL.Vector3D.FromUnityVector3(shipParameters.attitudeThrust.positive),
+            AL.Vector3D.FromUnityVector3(shipParameters.attitudeThrust.negative)
+        );
+        params_.environment = new AL.EnvironmentParams
+        {
+            gravity = AL.Vector3D.FromUnityVector3(shipParameters.environment.gravity),
+            wind_velocity = AL.Vector3D.FromUnityVector3(shipParameters.environment.windVelocity),
+            air_density = shipParameters.environment.airDensity,
+            drag_coefficient = shipParameters.environment.dragCoefficient,
+            cross_sectional_area = shipParameters.environment.crossSectionalArea
+        };
+        params_.orientation_limits = new AL.Orientation(
+            shipParameters.orientationLimits.x,
+            shipParameters.orientationLimits.y,
+            shipParameters.orientationLimits.z
+        );
+        params_.angular_rate_limit = AL.Vector3D.FromUnityVector3(shipParameters.angularRateLimit);
+        params_.fuel_consumption_rate = shipParameters.fuelConsumptionRate;
+        
+        bool hasObstacles = (useTriggerDetection && (
+            frontObstacles.Count > 0 || backObstacles.Count > 0 || 
+            leftObstacles.Count > 0 || rightObstacles.Count > 0 || 
+            topObstacles.Count > 0 || bottomObstacles.Count > 0));
+        
+        if (hasObstacles)
+        {
+            params_.max_speed = maxSpeedNearObstacles;
+        }
+        else
+        {
+            params_.max_speed = maxSpeed > 0 ? maxSpeed : 0;
+        }
+        
+        params_.gear_points_body = new List<AL.Vector3D>();
+        
+        if (gearObjects != null && gearObjects.Count > 0)
+        {
+            foreach (var gearObject in gearObjects)
+            {
+                if (gearObject != null)
+                {
+                    Vector3 localPos = transform.InverseTransformPoint(gearObject.position);
+                    params_.gear_points_body.Add(AL.Vector3D.FromUnityVector3(localPos));
+                }
+            }
+            
+            shipParameters.gearPointsBody.Clear();
+            foreach (var gearObject in gearObjects)
+            {
+                if (gearObject != null)
+                {
+                    Vector3 localPos = transform.InverseTransformPoint(gearObject.position);
+                    shipParameters.gearPointsBody.Add(localPos);
+                }
+            }
+        }
+        else
+        {
+            foreach (var point in shipParameters.gearPointsBody)
+            {
+                params_.gear_points_body.Add(AL.Vector3D.FromUnityVector3(point));
+            }
+        }
+        
+        return params_;
+    }
+    
+    private void DrawSensor(Transform sensorTransform)
+    {
+        if (sensorTransform != null)
+        {
+            Gizmos.DrawLine(sensorTransform.position, sensorTransform.position + sensorTransform.forward * sensorRange);
+        }
+    }
+    
+    private void DrawTriggerCollider(Collider collider)
+    {
+        if (collider != null && collider is BoxCollider)
+        {
+            BoxCollider boxCollider = collider as BoxCollider;
+            Gizmos.matrix = collider.transform.localToWorldMatrix;
+            Gizmos.DrawWireCube(boxCollider.center, boxCollider.size);
+            Gizmos.matrix = Matrix4x4.identity;
+        }
+    }
+    
+    private void DrawObstacles(HashSet<Collider> obstacles)
+    {
+        foreach (var obstacle in obstacles)
+        {
+            if (obstacle != null)
+            {
+                Gizmos.DrawWireSphere(obstacle.bounds.center, 0.5f);
+            }
+        }
+    }
+    
+    private float NormalizeAngle(float angle)
+    {
+        while (angle > 180f) angle -= 360f;
+        while (angle < -180f) angle += 360f;
+        return angle;
+    }
+    
+    public AL.LandingStatus GetLandingStatus()
+    {
+        return controlSystem != null ? controlSystem.EvaluateStatus() : AL.LandingStatus.InFlight;
+    }
+    
+    public AL.ShipState GetCurrentState()
+    {
+        return controlSystem != null ? controlSystem.GetState() : new AL.ShipState();
+    }
+    
+    public bool IsLanding()
+    {
+        return isLanding;
+    }
+    
+    public AL.LazySequence<Vector3> GetLandingTrajectory()
+    {
+        return landingTrajectory;
+    }
+    
+    public AL.LazySequence<AL.ObstacleSensors> GetSensorHistory()
+    {
+        return sensorHistory;
+    }
+    
+    public AL.ISequence<Vector3> GetFilteredTrajectory(float minDistance)
+    {
+        if (landingTrajectory == null || landingTrajectory.GetLength() <= 0)
+            return new AL.ArraySequence<Vector3>();
+        
+        Vector3 lastPos = landingTrajectory.GetFirst();
+        AL.ArraySequence<Vector3> filtered = new AL.ArraySequence<Vector3>();
+        filtered = (AL.ArraySequence<Vector3>)filtered.Append(lastPos);
+        
+        for (int i = 1; i < landingTrajectory.GetLength(); i++)
+        {
+            Vector3 currentPos = landingTrajectory.Get(i);
+            if (Vector3.Distance(currentPos, lastPos) >= minDistance)
+            {
+                filtered = (AL.ArraySequence<Vector3>)filtered.Append(currentPos);
+                lastPos = currentPos;
+            }
+        }
+        
+        return filtered;
+    }
+    
+    public AL.ISequence<AL.ObstacleSensors> GetObstacleEvents()
+    {
+        if (sensorHistory == null || sensorHistory.GetLength() <= 0)
+            return new AL.ArraySequence<AL.ObstacleSensors>();
+        
+        return sensorHistory.Where(s => s.front || s.back || s.left || s.right || s.top || s.bottom);
     }
 }
 
